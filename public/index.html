@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f7f4">
+    <meta name="description" content="La Vaquita: administra las ventas, el inventario y las finanzas de tu negocio desde tu navegador.">
+    <title>La Vaquita</title>
+    <link rel="icon" type="image/png" href="/logo.png">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/vendor/sql-wasm.js"></script>
+    <script src="/database.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main id="welcome" class="welcome-screen">
+      <header class="welcome-top">
+        <a class="brand" href="#" aria-label="La Vaquita, inicio">
+          <img class="brand-logo" src="/logo.png" alt="">
+          <span class="brand-name">La Vaquita</span>
+        </a>
+        <span class="local-badge"><span class="live-dot"></span> Tus datos, siempre locales</span>
+      </header>
+      <section class="welcome-content">
+        <div class="welcome-copy">
+          <span class="eyebrow"><span class="eyebrow-line"></span> GESTIÓN SIMPLE, NEGOCIO CLARO</span>
+          <h1>Tu negocio,<br>en <span>orden.</span></h1>
+          <p>Ventas, inventario y finanzas en un solo lugar. Fácil de usar, tuyo de verdad: los datos viven en tu equipo.</p>
+          <div class="welcome-actions">
+            <button id="create-database" class="button button-primary button-large" type="button">Crear una base de datos <span aria-hidden="true">→</span></button>
+            <button id="open-database" class="button button-outline button-large" type="button"><span class="folder-icon" aria-hidden="true">↥</span> Abrir una existente</button>
+            <input id="database-file" class="visually-hidden" type="file" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3">
+          </div>
+          <div class="welcome-footnote"><span aria-hidden="true">◇</span> Funciona sin subir tus datos a ningún servidor.</div>
+        </div>
+        <div class="welcome-art" aria-hidden="true">
+          <div class="art-glow"></div>
+          <div class="art-card art-card-main">
+            <div class="art-card-head"><span>Resumen de hoy</span><span class="art-dots">•••</span></div>
+            <div class="art-label">VENTAS DEL DÍA</div>
+            <div class="art-amount">$ 248.500</div>
+            <div class="art-chart"><i style="height:38%"></i><i style="height:51%"></i><i style="height:43%"></i><i style="height:71%"></i><i style="height:59%"></i><i style="height:87%"></i><i style="height:100%"></i></div>
+            <div class="art-chart-labels"><span>lun</span><span>mar</span><span>mié</span><span>jue</span><span>vie</span><span>sáb</span><span>dom</span></div>
+          </div>
+          <div class="art-card art-card-note"><span class="note-icon">↗</span><div><b>Todo en orden</b><small>Inventario actualizado</small></div><span class="note-check">✓</span></div>
+          <div class="art-sticker">hecho<br>para crecer<span>✳</span></div>
+          <div class="art-sparkle sparkle-one">✳</div><div class="art-sparkle sparkle-two">✦</div>
+        </div>
+      </section>
+      <footer class="welcome-footer"><span>LA VAQUITA <span class="footer-divider">/</span> PARA NEGOCIOS QUE CRECEN</span><span>GUARDADO EN TU DISPOSITIVO <span class="lock-icon">⌑</span></span></footer>
+    </main>
+
+    <div id="application" class="application hidden">
+      <aside class="sidebar">
+        <a class="brand sidebar-brand" href="#" aria-label="La Vaquita, inicio">
+          <img class="brand-logo" src="/logo.png" alt="">
+          <span class="brand-name">La Vaquita</span>
+        </a>
+        <div class="business-label">TU NEGOCIO</div>
+        <nav class="main-nav" aria-label="Secciones principales">
+          <button class="nav-link active" data-view="dashboard"><span class="nav-icon">⌂</span> Resumen</button>
+          <button class="nav-link" data-view="inventory"><span class="nav-icon">▦</span> Inventario</button>
+          <button class="nav-link" data-view="sales"><span class="nav-icon">↗</span> Ventas</button>
+          <button class="nav-link" data-view="sales-history"><span class="nav-icon">◷</span> Historial</button>
+          <button class="nav-link" data-view="products"><span class="nav-icon">◇</span> Productos</button>
+          <button class="nav-link" data-view="finances"><span class="nav-icon">◷</span> Finanzas</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="privacy-card"><span class="privacy-icon">◈</span><div><b>Privado por diseño</b><small>Tu base de datos nunca sale de aquí.</small></div></div>
+          <div class="sidebar-db"><span class="database-icon">▣</span><span id="sidebar-db-name">la-vaquita.db</span><span class="connection-dot"></span></div>
+          <button id="change-database" class="change-db-button">Cambiar base de datos</button>
+        </div>
+      </aside>
+      <section class="workspace">
+        <header class="topbar">
+          <div class="breadcrumb"><span>Mi negocio</span><span class="crumb-slash">/</span><b id="page-title">Resumen</b></div>
+          <div class="topbar-actions"><span class="today-label" id="today-label"></span><span id="autosave-status" class="autosave-status" role="status" aria-live="polite"></span><button id="save-database" class="button button-dark" type="button"><span aria-hidden="true">↓</span> Guardar / descargar</button><button id="exit-application" class="button button-outline button-small" type="button">Salir</button></div>
+        </header>
+        <main id="page-content" class="page-content"></main>
+      </section>
+    </div>
+
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  </body>
+</html>
