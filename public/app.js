@@ -45,8 +45,11 @@ let saleCustomerId = "";
 let saleDiscount = "0";
 let saleDocumentType = "BOLETA";
 let saleFolio = "";
+let editingSaleId = null;
 let customerHistoryId = null;
 let searchValue = "";
+let barcodeBuffer = "";
+let barcodeLastKeyTime = 0;
 let toastTimer;
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -202,6 +205,7 @@ async function openApplication(database, name, handle = null, saveOnOpen = true)
   saleDiscount = "0";
   saleDocumentType = "BOLETA";
   saleFolio = "";
+  editingSaleId = null;
   render();
   if (saveOnOpen) scheduleAutoSave();
   if (journalMode.toLowerCase() !== "wal") {
@@ -259,8 +263,20 @@ async function createDatabase() {
   try {
     await initializeSql();
     const database = new SQL.Database();
-    await openApplication(database, "la-vaquita.db");
-    notify("Base de datos nueva lista. Agrega tus primeros productos.");
+    try {
+      await DatabaseLayer.initialize(database);
+      const bytes = database.export();
+      const blob = new Blob([bytes], { type: "application/vnd.sqlite3" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "la-vaquita.db";
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notify("Archivo «la-vaquita.db» vacío descargado. Usa «Abrir una existente» para seleccionarlo.");
+    } finally {
+      database.close();
+    }
   } catch (error) {
     showError(error, "No se pudo crear la base de datos.");
   }
@@ -294,7 +310,8 @@ function render() {
   if (!databaseReady()) return;
   $("#page-title").textContent = TITLES[currentView];
   $(".nav-link.active")?.classList.remove("active");
-  $(`.nav-link[data-view="${currentView}"]`)?.classList.add("active");
+  const navView = currentView === "sales-history" ? "sales" : currentView;
+  $(`.nav-link[data-view="${navView}"]`)?.classList.add("active");
   const pages = {
     dashboard: renderDashboard,
     inventory: renderInventory,
@@ -575,7 +592,7 @@ function renderDashboard() {
       <article class="panel list-panel"><div class="panel-heading"><div><h2>Reposición de stock</h2><p>Según el stock mínimo configurado</p></div><button class="panel-link" data-view="inventory">Ver inventario →</button></div><div class="stock-list">${stockGroupMarkup(3)}</div><p class="stock-note">Crítico: sin stock · Bajo: bajo el mínimo · Sugerencia: hasta 50% sobre el mínimo.</p></article>
     </section>
     <article class="panel section-spacer"><div class="panel-heading"><div><h2>Últimas ventas</h2><p>Actividad reciente de tu negocio</p></div><button class="panel-link" data-view="sales">Ir a ventas →</button></div>
-      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>`;
+      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th><th></th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>`;
 }
 
 function searchToolbar(placeholder, button = "") {
@@ -590,7 +607,7 @@ function productRows(products) {
 function renderProducts() {
   const term = searchValue.toLocaleLowerCase("es");
   const products = query("SELECT id,name,sku,category,price,cost,stock,min_stock,barcode,unit,net_price,tax_exempt,description FROM products ORDER BY name")
-    .filter((product) => `${product.name} ${product.sku} ${product.category}`.toLocaleLowerCase("es").includes(term));
+    .filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
   const addButton = `<button class="button button-primary button-small" data-action="new-product">+ Agregar producto</button>`;
   return `${pageHeading("CATÁLOGO", "Tus productos", "Administra precios, categorías y disponibilidad.", addButton)}
     <article class="panel table-panel">${searchToolbar("Buscar por nombre, código o categoría")}<div class="table-scroll"><table class="data-table"><thead><tr><th>PRODUCTO</th><th>CÓDIGO</th><th>CATEGORÍA</th><th>PRECIO</th><th>STOCK</th><th>ESTADO</th><th></th></tr></thead><tbody>${productRows(products)}</tbody></table></div></article>`;
@@ -598,8 +615,8 @@ function renderProducts() {
 
 function renderInventory() {
   const term = searchValue.toLocaleLowerCase("es");
-  const products = query("SELECT id,name,sku,category,price,stock,min_stock,unit FROM products ORDER BY name")
-    .filter((product) => `${product.name} ${product.sku} ${product.category}`.toLocaleLowerCase("es").includes(term));
+  const products = query("SELECT id,name,sku,barcode,category,price,stock,min_stock,unit FROM products ORDER BY name")
+    .filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
   const analysis = inventorySalesAnalysis();
   const button = `<button class="button button-muted button-small" data-action="export-inventory">↓ Exportar a Excel</button><button class="button button-primary button-small" data-action="new-movement">+ Registrar movimiento</button>`;
   const rows = products.length ? products.map((product) => `<tr><td><strong>${escapeHtml(product.name)}</strong></td><td>${escapeHtml(product.sku || "—")}</td><td>${escapeHtml(product.category || "—")}</td><td>${quantityLabel(product.stock, product.unit)}</td><td>${quantityLabel(product.min_stock, product.unit)}</td><td>${product.stock <= product.min_stock ? `<span class="low-pill">Reponer · mín. ${quantityLabel(product.min_stock, product.unit)}</span>` : `<span class="good-pill">En orden</span>`}</td><td><div class="action-cell"><button class="table-action" data-action="movement-for-product" data-id="${product.id}">Ajustar</button><button class="table-action" data-action="restock-product" data-id="${product.id}">Reponer</button></div></td></tr>`).join("") : `<tr><td colspan="7">${emptyState("Inventario vacío", "Agrega productos para ver su stock.")}</td></tr>`;
@@ -644,16 +661,26 @@ function exportInventory() {
 }
 
 function renderSales() {
-  const products = query("SELECT id,name,sku,category,price,stock,unit,net_price,cost,tax_exempt FROM products WHERE active=1 ORDER BY name");
+  const products = query("SELECT id,name,sku,barcode,category,price,stock,unit,net_price,cost,tax_exempt FROM products WHERE active=1 ORDER BY name");
+  const originalItems = editingSaleId
+    ? query("SELECT product_id, SUM(quantity) AS quantity FROM sale_items WHERE sale_id=? GROUP BY product_id", [editingSaleId])
+    : [];
+  const originalQtyByProduct = new Map(originalItems.map((row) => [Number(row.product_id), Number(row.quantity) || 0]));
+  for (const product of products) {
+    product.availableStock = Number(product.stock) + (originalQtyByProduct.get(Number(product.id)) || 0);
+  }
   const term = searchValue.toLocaleLowerCase("es");
-  const filtered = products.filter((product) => `${product.name} ${product.sku} ${product.category}`.toLocaleLowerCase("es").includes(term));
+  const filtered = products.filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
   const customers = query("SELECT id,name FROM customers ORDER BY name");
   const subTotal = saleCart.reduce((total, item) => total + Math.round(item.price * item.quantity), 0);
   const discount = Math.min(Number(saleDiscount) || 0, subTotal);
   const total = subTotal - discount;
   const documentTypes = ["BOLETA", "FACTURA", "TICKET_INTERNO"];
-  const paymentTotal = paymentRows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-  const cashPaymentTotal = paymentRows.reduce((sum, row) => sum + (row.type === "Efectivo" ? Number(row.amount) || 0 : 0), 0);
+  const isSplitPayment = paymentRows.length > 1;
+  const isSingleNonCash = !isSplitPayment && paymentRows[0]?.type !== "Efectivo";
+  const effectiveAmounts = paymentRows.map((row) => isSingleNonCash ? total : (Number(row.amount) || 0));
+  const paymentTotal = effectiveAmounts.reduce((sum, amount) => sum + amount, 0);
+  const cashPaymentTotal = paymentRows.reduce((sum, row, index) => sum + (row.type === "Efectivo" ? effectiveAmounts[index] : 0), 0);
   const otherPaymentTotal = paymentTotal - cashPaymentTotal;
   const changeDue = otherPaymentTotal <= total && paymentTotal > total ? paymentTotal - total : 0;
   const paymentStatus = otherPaymentTotal > total
@@ -666,37 +693,39 @@ function renderSales() {
           ? `Vuelto: ${money(changeDue)}`
           : `Excede ${money(paymentTotal - total)}; solo efectivo permite vuelto`;
   const paymentError = paymentTotal < total || otherPaymentTotal > total || (paymentTotal > total && changeDue === 0);
-  const productResults = filtered.length ? filtered.map((product) => `<div class="result-row"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span class="result-info"><b>${escapeHtml(product.name)}</b><small>${quantityLabel(product.stock, product.unit)} disponibles${product.sku ? ` · ${escapeHtml(product.sku)}` : ""}</small></span><span class="result-price">${money(product.price)}</span><button class="icon-button" data-action="add-cart" data-id="${product.id}" aria-label="Agregar ${escapeHtml(product.name)}" ${product.stock <= 0 ? "disabled" : ""}>+</button></div>`).join("") : emptyState("No encontramos productos", "Agrega productos en la sección Productos.");
-  const cartContents = saleCart.length ? saleCart.map((item) => `<div class="cart-row"><span class="cart-name"><b>${escapeHtml(item.name)}</b><small>${money(item.price)} / ${item.unit} · ${money(item.price * item.quantity)}</small></span><span class="qty-controls"><input class="cart-quantity" data-cart-quantity="${item.id}" type="number" min="0.001" max="${item.stock}" step="${item.unit === "UN" || item.unit === "CAJA" ? "1" : "0.001"}" value="${item.quantity}" aria-label="Cantidad de ${escapeHtml(item.name)}"></span></div>`).join("") : emptyState("Tu venta está vacía", "Busca un producto y agrégalo aquí.");
+  const productResults = filtered.length ? filtered.map((product) => {
+    const codeText = [product.sku, product.barcode].filter(Boolean).join(" · ");
+    return `<div class="result-row"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span class="result-info"><b>${escapeHtml(product.name)}</b><small>${quantityLabel(product.availableStock, product.unit)} disponibles${codeText ? ` · ${escapeHtml(codeText)}` : ""}</small></span><span class="result-price">${money(product.price)}</span><button class="icon-button" data-action="add-cart" data-id="${product.id}" aria-label="Agregar ${escapeHtml(product.name)}" ${product.availableStock <= 0 ? "disabled" : ""}>+</button></div>`;
+  }).join("") : emptyState("No encontramos productos", "Agrega productos en la sección Productos.");
+  const cartContents = saleCart.length ? saleCart.map((item) => `<div class="cart-row"><span class="cart-name"><b>${escapeHtml(item.name)}</b><small>${money(item.price)} / ${item.unit} · ${money(item.price * item.quantity)}</small></span><span class="qty-controls"><input class="cart-quantity" data-cart-quantity="${item.id}" type="number" min="0.001" max="${item.stock}" step="${item.unit === "UN" || item.unit === "CAJA" ? "1" : "0.001"}" value="${item.quantity}" aria-label="Cantidad de ${escapeHtml(item.name)}"><button class="payment-remove" type="button" data-action="remove-cart-item" data-id="${item.id}" aria-label="Quitar ${escapeHtml(item.name)}" title="Quitar producto">×</button></span></div>`).join("") : emptyState("Tu venta está vacía", "Pistolea un código de barras o busca un producto para agregarlo aquí.");
   const paymentMarkup = paymentRows.map((payment, index) => {
-    const isCash = payment.type === "Efectivo";
-    const referenceRequired = !isCash && Number(payment.amount) > 0;
-    return `<div class="payment-entry ${isCash ? "cash" : "with-reference"}">
+    const showAmountInput = isSplitPayment || payment.type === "Efectivo";
+    return `<div class="payment-entry ${showAmountInput ? "with-amount" : "single-method"}">
       <select data-payment-type="${index}" aria-label="Tipo de pago">${PAYMENT_TYPES.map((type) => `<option ${type === payment.type ? "selected" : ""}>${type}</option>`).join("")}</select>
-      <input data-payment-amount="${index}" type="text" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(payment.amount)}" placeholder="$ monto" aria-label="Monto del pago">
-      ${isCash ? "" : `<input data-payment-reference="${index}" type="text" value="${escapeHtml(payment.reference || "")}" placeholder="Folio obligatorio" aria-label="Folio del pago" ${referenceRequired ? "required" : ""}>`}
+      ${showAmountInput ? `<input data-payment-amount="${index}" type="text" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(payment.amount)}" placeholder="$ monto" aria-label="Monto del pago">` : ""}
       ${index > 0 ? `<button class="payment-remove" type="button" data-action="remove-payment" data-index="${index}" aria-label="Eliminar medio de pago ${index + 1}" title="Eliminar medio de pago">×</button>` : ""}
     </div>`;
   }).join("");
-  return `${pageHeading("REGISTRO DE VENTAS", "Ventas", "Crea ventas, aplica descuentos y combina medios de pago.")}
+  const historyButton = `${editingSaleId ? `<button class="button button-muted button-small" data-action="cancel-edit-sale">Cancelar edición</button>` : ""}<button class="button button-muted button-small" data-view="sales-history">◷ Historial de ventas</button>`;
+  return `${pageHeading(editingSaleId ? "EDICIÓN DE VENTA" : "REGISTRO DE VENTAS", editingSaleId ? `Editar venta #${editingSaleId}` : "Ventas", editingSaleId ? "Modifica los productos, el descuento o los medios de pago y guarda los cambios." : "Crea ventas, aplica descuentos y combina medios de pago.", historyButton)}
     <div class="sale-layout">
-      <article class="panel cart-panel"><div class="panel-heading"><div><h2>Tu venta</h2><p>${saleCart.length} producto${saleCart.length === 1 ? "" : "s"} agregado${saleCart.length === 1 ? "" : "s"}</p></div></div><div class="cart-items">${cartContents}</div>
+      <article class="panel cart-panel"><div class="panel-heading"><div><h2>${editingSaleId ? `Venta #${editingSaleId}` : "Tu venta"}</h2><p>${saleCart.length} producto${saleCart.length === 1 ? "" : "s"} agregado${saleCart.length === 1 ? "" : "s"}</p></div></div><div class="cart-items">${cartContents}</div>
         <div class="cart-footer"><div class="field"><label for="sale-customer">Cliente (opcional)</label><select id="sale-customer"><option value="" ${saleCustomerId === "" ? "selected" : ""}>Venta sin cliente</option>${customers.map((customer) => `<option value="${customer.id}" ${String(customer.id) === saleCustomerId ? "selected" : ""}>${escapeHtml(customer.name)}</option>`).join("")}</select></div>
           <div class="form-row"><div class="field"><label for="sale-document-type">Documento</label><select id="sale-document-type">${documentTypes.map((type) => `<option ${type === saleDocumentType ? "selected" : ""}>${type}</option>`).join("")}</select></div>${field("sale-folio", "Folio", saleFolio)}</div>
           <div class="field"><label for="sale-discount">Descuento (CLP)</label><input id="sale-discount" type="text" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(saleDiscount)}"></div>
           <div class="cart-line"><span>Subtotal</span><span>${money(subTotal)}</span></div><div class="cart-line"><span>Descuento</span><span>− ${money(discount)}</span></div><div class="cart-line total"><span>Total a pagar</span><span>${money(total)}</span></div>
           <div class="payment-header"><b>MEDIOS DE PAGO</b><button class="table-action" data-action="add-payment">+ Dividir pago</button></div>${paymentMarkup}
           <div id="payment-balance" class="payment-balance ${paymentError ? "error" : changeDue > 0 ? "change-due" : ""}">Ingresado: ${money(paymentTotal)} · ${paymentStatus}</div>
-          <button class="button button-primary full-width" data-action="complete-sale" ${saleCart.length === 0 ? "disabled" : ""}>Completar venta</button>
+          <button class="button button-primary full-width" data-action="complete-sale" ${saleCart.length === 0 ? "disabled" : ""}>${editingSaleId ? "Guardar cambios de la venta" : "Completar venta"}</button>
         </div>
       </article>
-      <article class="panel table-panel product-search-panel"><div class="panel-heading"><div><h2>Agregar productos</h2><p>Busca y selecciona productos para esta venta</p></div></div>${searchToolbar("Buscar por nombre o código")}<div class="search-results">${productResults}</div></article>
+      <article class="panel table-panel product-search-panel"><div class="panel-heading"><div><h2>Agregar productos</h2><p>Pistolea con el lector de código de barras o busca manualmente</p></div></div>${searchToolbar("Pistolea el código de barras o busca por nombre / código…")}<div class="search-results">${productResults}</div></article>
     </div>`;
 }
 
 function salesTable(sales) {
-  const rows = sales.length ? sales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada"}</span></td></tr>`).join("") : `<tr><td colspan="6">${emptyState("Sin ventas registradas", "No hay ventas en este período.")}</td></tr>`;
-  return `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>DESCUENTO</th><th>TOTAL</th><th>ESTADO</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const rows = sales.length ? sales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada"}</span></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("") : `<tr><td colspan="7">${emptyState("Sin ventas registradas", "No hay ventas en este período.")}</td></tr>`;
+  return `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>DESCUENTO</th><th>TOTAL</th><th>ESTADO</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function salesSummary(sales, label) {
@@ -715,7 +744,8 @@ function renderSalesHistory() {
     WHERE substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?
     ORDER BY s.date DESC,s.id DESC`, [monthStart, todayKey]);
   const todaySales = monthSales.filter((sale) => String(sale.date).slice(0, 10) === todayKey);
-  return `${pageHeading("CONSULTA", "Historial de ventas", "Consulta las ventas del día y del mes, o exporta cualquier período en Excel.")}
+  const backButton = `<button class="button button-muted button-small" data-view="sales">← Volver a ventas</button>`;
+  return `${pageHeading("CONSULTA", "Historial de ventas", "Consulta las ventas del día y del mes, o exporta cualquier período en Excel.", backButton)}
     <article class="panel sales-export-panel">
       <div class="panel-heading"><div><h2>Exportar registro de ventas</h2><p>Elige las fechas que quieres descargar o usa un período mensual rápido.</p></div></div>
       <div class="sales-export-controls">
@@ -804,12 +834,12 @@ function renderCustomerHistory(customerId) {
   const items = query(`SELECT si.sale_id,si.product_name,si.quantity,si.unit_price,si.line_total FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.customer_id=? ORDER BY s.id DESC,si.id`, [customerId]);
   const rows = sales.length ? sales.map((sale) => {
     const saleItems = items.filter((item) => item.sale_id === sale.id);
-    return `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${saleItems.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join("<br>")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td></tr>`;
-  }).join("") : `<tr><td colspan="5">${emptyState("Todavía no tiene compras", "Al asociar una venta con este cliente, aparecerá en su historial.")}</td></tr>`;
+    return `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${saleItems.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join("<br>")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`;
+  }).join("") : `<tr><td colspan="6">${emptyState("Todavía no tiene compras", "Al asociar una venta con este cliente, aparecerá en su historial.")}</td></tr>`;
   return `<div class="detail-bar"><button class="detail-back" data-action="back-customers">← Volver a clientes</button></div>
     ${pageHeading("HISTORIAL DEL CLIENTE", escapeHtml(customer.name), `${escapeHtml(customer.phone || "Sin teléfono")} · ${escapeHtml(customer.email || "Sin correo")}`)}
     <div class="history-summary"><div><b>${sales.length}</b><small>VENTAS REGISTRADAS</small></div><div><b>${money(total)}</b><small>TOTAL COMPRADO</small></div></div>
-    <article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>PRODUCTOS</th><th>DESCUENTO</th><th>TOTAL</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
+    <article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>PRODUCTOS</th><th>DESCUENTO</th><th>TOTAL</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
 function renderSuppliers() {
@@ -827,19 +857,84 @@ function renderFinances() {
   const firstDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
   const firstDayKey = dateKey(firstDay);
   const currentMonth = monthKey(today);
+  const prevMonthDate = addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -1);
+  const prevMonth = monthKey(prevMonthDate);
   const firstMonth = monthKey(addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -(financeRange - 1)));
+  const percentFormatter = new Intl.NumberFormat("es-CL", { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+  const pct = (value) => `${percentFormatter.format(Number(value) || 0)}%`;
+  const deltaBadge = (current, previous) => {
+    if (!previous && !current) return "Sin variación vs. mes anterior";
+    if (!previous) return "▲ Nuevo este mes (sin registro mes anterior)";
+    const diff = ((current - previous) / Math.abs(previous)) * 100;
+    const sign = diff > 0 ? "▲ +" : diff < 0 ? "▼ " : "• ";
+    return `${sign}${pct(diff)} vs. mes anterior (${money(previous)})`;
+  };
+
   const recentSales = Number(scalar(`SELECT COALESCE(SUM(total),0) AS value FROM sales
     WHERE status='completed' AND substr(date,1,10) BETWEEN ? AND ?`, [firstDayKey, todayKey])) || 0;
   const recentLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
     FROM stock_movements WHERE type='loss' AND substr(date,1,10) BETWEEN ? AND ?`, [firstDayKey, todayKey])) || 0;
+
   const monthSales = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [currentMonth])) || 0;
+  const prevMonthSales = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [prevMonth])) || 0;
+  const monthTxCount = Number(scalar("SELECT COUNT(*) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [currentMonth])) || 0;
+  const prevMonthTxCount = Number(scalar("SELECT COUNT(*) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [prevMonth])) || 0;
+  const monthUnitsSold = Number(scalar(`SELECT COALESCE(SUM(si.quantity),0) AS value
+    FROM sale_items si JOIN sales s ON s.id=si.sale_id
+    WHERE s.status='completed' AND substr(s.date,1,7)=?`, [currentMonth])) || 0;
   const monthCost = Number(scalar(`SELECT COALESCE(SUM(si.quantity*si.unit_cost),0) AS value
     FROM sale_items si JOIN sales s ON s.id=si.sale_id
     WHERE s.status='completed' AND substr(s.date,1,7)=?`, [currentMonth])) || 0;
+  const prevMonthCost = Number(scalar(`SELECT COALESCE(SUM(si.quantity*si.unit_cost),0) AS value
+    FROM sale_items si JOIN sales s ON s.id=si.sale_id
+    WHERE s.status='completed' AND substr(s.date,1,7)=?`, [prevMonth])) || 0;
   const monthExpenses = Number(scalar("SELECT COALESCE(SUM(amount),0) AS value FROM expenses WHERE substr(date,1,7)=?", [currentMonth])) || 0;
+  const prevMonthExpenses = Number(scalar("SELECT COALESCE(SUM(amount),0) AS value FROM expenses WHERE substr(date,1,7)=?", [prevMonth])) || 0;
   const monthLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
     FROM stock_movements WHERE type='loss' AND substr(date,1,7)=?`, [currentMonth])) || 0;
-  const profit = monthSales - monthCost - monthExpenses - monthLosses;
+  const prevMonthLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
+    FROM stock_movements WHERE type='loss' AND substr(date,1,7)=?`, [prevMonth])) || 0;
+  const monthPurchases = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
+    FROM stock_movements WHERE type='entry' AND substr(date,1,7)=?`, [currentMonth])) || 0;
+
+  const grossProfit = monthSales - monthCost;
+  const prevGrossProfit = prevMonthSales - prevMonthCost;
+  const grossMarginPct = monthSales > 0 ? (grossProfit / monthSales) * 100 : 0;
+  const profit = grossProfit - monthExpenses - monthLosses;
+  const prevProfit = prevGrossProfit - prevMonthExpenses - prevMonthLosses;
+  const netMarginPct = monthSales > 0 ? (profit / monthSales) * 100 : 0;
+  const avgTicket = monthTxCount > 0 ? Math.round(monthSales / monthTxCount) : 0;
+  const prevAvgTicket = prevMonthTxCount > 0 ? Math.round(prevMonthSales / prevMonthTxCount) : 0;
+  const itemsPerSale = monthTxCount > 0 ? monthUnitsSold / monthTxCount : 0;
+
+  const inventoryStats = query(`SELECT
+      COALESCE(SUM(CASE WHEN stock > 0 THEN stock * cost ELSE 0 END), 0) AS cost_value,
+      COALESCE(SUM(CASE WHEN stock > 0 THEN stock * price ELSE 0 END), 0) AS retail_value
+    FROM products WHERE active=1`)[0] || { cost_value: 0, retail_value: 0 };
+  const inventoryCostValue = Number(inventoryStats.cost_value) || 0;
+  const inventoryRetailValue = Number(inventoryStats.retail_value) || 0;
+  const inventoryPotentialProfit = Math.max(0, inventoryRetailValue - inventoryCostValue);
+
+  const paymentBreakdown = query(`SELECT p.type, COUNT(DISTINCT p.sale_id) AS sales_count, COALESCE(SUM(p.amount),0) AS amount
+    FROM payments p JOIN sales s ON s.id=p.sale_id
+    WHERE s.status='completed' AND substr(s.date,1,7)=?
+    GROUP BY p.type ORDER BY amount DESC`, [currentMonth]);
+  const totalPaymentsMonth = paymentBreakdown.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+
+  const topProfitProducts = query(`SELECT si.product_name AS name,
+      SUM(si.quantity) AS units,
+      SUM(si.line_total) AS revenue,
+      SUM(si.quantity * si.unit_cost) AS cost,
+      SUM(si.line_total - (si.quantity * si.unit_cost)) AS profit
+    FROM sale_items si JOIN sales s ON s.id=si.sale_id
+    WHERE s.status='completed' AND substr(s.date,1,7)=?
+    GROUP BY si.product_id, si.product_name
+    ORDER BY profit DESC, revenue DESC LIMIT 5`, [currentMonth]);
+
+  const expenseCategories = query(`SELECT category, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount
+    FROM expenses WHERE substr(date,1,7)=?
+    GROUP BY category ORDER BY amount DESC`, [currentMonth]);
+
   const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total) AS sales,
       SUM(COALESCE(i.cost,0)) AS cost
     FROM sales s LEFT JOIN (
@@ -910,11 +1005,77 @@ function renderFinances() {
     return `${bars}<text x="${center}" y="222" text-anchor="middle" class="chart-text">${escapeHtml(month.label)}</text>`;
   }).join("");
   const financeChart = `<svg viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="Gráfico mensual de ganancias, pérdidas y compras">${chartGrid}<line x1="${chartLeft}" y1="${zeroY}" x2="${chartRight}" y2="${zeroY}" class="finance-zero-line"/>${chartBars}</svg>`;
+
+  const paymentRowsMarkup = paymentBreakdown.length ? paymentBreakdown.map((item) => {
+    const share = totalPaymentsMonth > 0 ? (Number(item.amount) / totalPaymentsMonth) * 100 : 0;
+    return `<div class="kpi-bar-row">
+      <div class="kpi-bar-head"><b>${escapeHtml(item.type)}</b><span>${money(item.amount)} · ${pct(share)} (${item.sales_count} ${item.sales_count === 1 ? "venta" : "ventas"})</span></div>
+      <div class="kpi-bar-track"><i style="width:${Math.max(4, Math.min(100, share))}%"></i></div>
+    </div>`;
+  }).join("") : emptyState("Sin pagos este mes", "Completa ventas para ver la distribución por medio de pago.");
+
+  const topProductsMarkup = topProfitProducts.length ? topProfitProducts.map((product, index) => {
+    const prodMargin = Number(product.revenue) > 0 ? (Number(product.profit) / Number(product.revenue)) * 100 : 0;
+    return `<div class="analysis-row">
+      <span class="rank-badge">${index + 1}</span>
+      <span class="stock-product"><b>${escapeHtml(product.name)}</b><small>Ventas: ${money(product.revenue)} · Margen: ${pct(prodMargin)}</small></span>
+      <span class="analysis-metric">${money(product.profit)}</span>
+    </div>`;
+  }).join("") : emptyState("Sin productos vendidos este mes", "Aquí verás los productos que dejan mayor ganancia.");
+
+  const expenseCategoriesMarkup = expenseCategories.length ? expenseCategories.map((cat) => {
+    const share = monthExpenses > 0 ? (Number(cat.amount) / monthExpenses) * 100 : 0;
+    return `<div class="kpi-bar-row">
+      <div class="kpi-bar-head"><b>${escapeHtml(cat.category)}</b><span>${money(cat.amount)} · ${pct(share)}</span></div>
+      <div class="kpi-bar-track kpi-bar-expense"><i style="width:${Math.max(4, Math.min(100, share))}%"></i></div>
+    </div>`;
+  }).join("") : emptyState("Sin gastos este mes", "Registra gastos para analizar en qué se va tu presupuesto.");
+
   const expenses = query("SELECT id,date,category,description,amount FROM expenses ORDER BY id DESC LIMIT 50");
   const rows = expenses.length ? expenses.map((expense) => `<tr><td>${dateLabel(expense.date)}</td><td><strong>${escapeHtml(expense.category)}</strong></td><td>${escapeHtml(expense.description)}</td><td>${money(expense.amount)}</td></tr>`).join("") : `<tr><td colspan="4">${emptyState("Sin gastos registrados", "Agrega gastos para tener una vista clara de tus finanzas.")}</td></tr>`;
-  return `${pageHeading("NÚMEROS CLAROS", "Finanzas", "Consulta las ventas recientes, las pérdidas de inventario y el movimiento de tu negocio.", `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
-    <section class="stats-grid">${statCard("Ventas · últimos 30 días", money(recentSales), `Desde el ${dateLabel(firstDayKey)}`, "↗")}${statCard("Pérdidas por mermas", money(recentLosses), "Costo de productos perdidos · 30 días", "↘")}${statCard("Balance del mes", money(profit), profit >= 0 ? "Ganancia menos mermas y gastos" : "Mermas y gastos superan la ganancia", "◷")}${statCard("Gastos del mes", money(monthExpenses), "Gastos registrados este mes", "▤")}</section>
-    <section class="panel finance-history section-spacer"><div class="panel-heading chart-panel-heading"><div><h2>Ganancias, pérdidas y compras</h2><p>Ganancias después del costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancias</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
+  const monthLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(today);
+
+  return `${pageHeading("INDICADORES CLAVE (KPI)", "Finanzas", ` Estado de resultados, rentabilidad y métricas clave de ${monthLabel}.`, `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
+    <section class="stats-grid">
+      ${statCard("Ingresos del mes", money(monthSales), deltaBadge(monthSales, prevMonthSales), "↗")}
+      ${statCard("Utilidad bruta", money(grossProfit), `Margen bruto: ${pct(grossMarginPct)} · Costo: ${money(monthCost)}`, "◈")}
+      ${statCard("Utilidad neta (Balance)", money(profit), `Margen neto: ${pct(netMarginPct)} · ${deltaBadge(profit, prevProfit)}`, "◷")}
+      ${statCard("Ticket promedio", money(avgTicket), `${monthTxCount} ventas este mes · ${quantityFormatter.format(itemsPerSale)} prod/venta`, "▤")}
+    </section>
+    <section class="stats-grid section-spacer">
+      ${statCard("Gastos operativos (mes)", money(monthExpenses), deltaBadge(monthExpenses, prevMonthExpenses), "↘")}
+      ${statCard("Mermas (mes)", money(monthLosses), `${deltaBadge(monthLosses, prevMonthLosses)} · 30d: ${money(recentLosses)}`, "⚠")}
+      ${statCard("Capital en inventario", money(inventoryCostValue), `Valor venta: ${money(inventoryRetailValue)} · Ganancia pot.: ${money(inventoryPotentialProfit)}`, "▦")}
+      ${statCard("Compras de stock (mes)", money(monthPurchases), `Ventas últimos 30 días: ${money(recentSales)}`, "◇")}
+    </section>
+    <section class="finance-kpi-grid section-spacer">
+      <article class="panel kpi-panel">
+        <div class="panel-heading"><div><h2>Estado de resultados del mes</h2><p>Desglose de ingresos, costos y utilidad en ${escapeHtml(monthLabel)}</p></div></div>
+        <div class="pnl-list">
+          <div class="pnl-row"><span>(+) Ingresos por ventas (${monthTxCount})</span><strong>${money(monthSales)}</strong></div>
+          <div class="pnl-row pnl-negative"><span>(−) Costo de productos vendidos</span><strong>− ${money(monthCost)}</strong></div>
+          <div class="pnl-row pnl-subtotal"><span>(=) Utilidad bruta (${pct(grossMarginPct)})</span><strong>${money(grossProfit)}</strong></div>
+          <div class="pnl-row pnl-negative"><span>(−) Gastos operativos</span><strong>− ${money(monthExpenses)}</strong></div>
+          <div class="pnl-row pnl-negative"><span>(−) Pérdidas por mermas</span><strong>− ${money(monthLosses)}</strong></div>
+          <div class="pnl-row pnl-total ${profit < 0 ? "is-loss" : "is-profit"}"><span>(=) Utilidad neta (${pct(netMarginPct)})</span><strong>${money(profit)}</strong></div>
+        </div>
+      </article>
+      <article class="panel kpi-panel">
+        <div class="panel-heading"><div><h2>Recaudación por medio de pago</h2><p>Distribución de ingresos cobrados este mes</p></div></div>
+        <div class="kpi-bars">${paymentRowsMarkup}</div>
+      </article>
+    </section>
+    <section class="finance-kpi-grid section-spacer">
+      <article class="panel kpi-panel">
+        <div class="panel-heading"><div><h2>Productos más rentables del mes</h2><p>Mayor aporte a la utilidad bruta (venta menos costo)</p></div></div>
+        <div class="analysis-list">${topProductsMarkup}</div>
+      </article>
+      <article class="panel kpi-panel">
+        <div class="panel-heading"><div><h2>Distribución de gastos del mes</h2><p>Categorías con mayor peso en tus gastos operativos</p></div></div>
+        <div class="kpi-bars">${expenseCategoriesMarkup}</div>
+      </article>
+    </section>
+    <section class="panel finance-history section-spacer"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias, pérdidas y compras</h2><p>Ganancias después del costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancias</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
     <h2 class="subheading">Gastos recientes</h2><article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>FECHA</th><th>CATEGORÍA</th><th>DESCRIPCIÓN</th><th>MONTO</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
@@ -1098,15 +1259,14 @@ function saveSale() {
     ? Math.max(0, netBeforeDiscount - Math.round(discount * netBeforeDiscount / subtotal))
     : 0;
   const taxAfterDiscount = total - netAfterDiscount;
+  const isSplitPayment = paymentRows.length > 1;
+  const isSingleNonCash = !isSplitPayment && paymentRows[0]?.type !== "Efectivo";
   const payments = paymentRows.map((payment) => ({
     type: payment.type,
-    amount: Number(payment.amount),
-    reference: String(payment.reference || "").trim()
+    amount: isSingleNonCash ? total : Number(payment.amount),
+    reference: null
   }));
   if (payments.some((payment) => !Number.isInteger(payment.amount) || payment.amount < 0)) throw new Error("Cada medio de pago debe tener un monto entero válido.");
-  if (payments.some((payment) => payment.amount > 0 && payment.type !== "Efectivo" && !payment.reference)) {
-    throw new Error("Ingresa el folio o número de operación de cada pago que no sea en efectivo.");
-  }
   const paymentTotal = payments.reduce((sum, payment) => sum + payment.amount, 0);
   const otherPaymentTotal = payments.reduce((sum, payment) => sum + (payment.type === "Efectivo" ? 0 : payment.amount), 0);
   const cashTotal = paymentTotal - otherPaymentTotal;
@@ -1121,24 +1281,44 @@ function saveSale() {
     cashRemaining -= appliedAmount;
     return { ...payment, amount: appliedAmount };
   });
+  const originalItems = editingSaleId
+    ? query("SELECT product_id, SUM(quantity) AS quantity FROM sale_items WHERE sale_id=? GROUP BY product_id", [editingSaleId])
+    : [];
+  const originalQtyByProduct = new Map(originalItems.map((row) => [Number(row.product_id), Number(row.quantity) || 0]));
   for (const item of saleCart) {
     const product = query("SELECT stock FROM products WHERE id=?", [item.id])[0];
-    if (!product || product.stock < item.quantity) throw new Error(`Stock insuficiente para «${item.name}». Actualiza la cantidad antes de completar la venta.`);
+    const availableStock = (Number(product?.stock) || 0) + (originalQtyByProduct.get(Number(item.id)) || 0);
+    if (!product || availableStock < item.quantity) throw new Error(`Stock insuficiente para «${item.name}». Actualiza la cantidad antes de completar la venta.`);
     if (["UN", "CAJA"].includes(item.unit) && !Number.isInteger(item.quantity)) throw new Error(`La cantidad de «${item.name}» debe ser entera.`);
   }
   const customerId = saleCustomerId || null;
+  const wasEditing = Boolean(editingSaleId);
   try {
     db.run("BEGIN TRANSACTION");
-    run(`INSERT INTO sales(customer_id,date,subtotal,discount,total,status,net_subtotal,tax,document_type,folio)
-      VALUES(?,?,?,?,?,'completed',?,?,?,?)`,
-    [customerId, localDateTime(), subtotal, discount, total, netAfterDiscount, taxAfterDiscount, saleDocumentType, saleFolio || null]);
-    const saleId = query("SELECT id FROM sales ORDER BY id DESC LIMIT 1")[0].id;
+    let saleId = editingSaleId;
+    if (editingSaleId) {
+      for (const oldItem of originalItems) {
+        const qty = Number(oldItem.quantity) || 0;
+        if (qty > 0) {
+          run("INSERT INTO stock_movements(product_id,type,quantity,note,date) VALUES(?,'adjustment',?,?,?)", [oldItem.product_id, qty, `Reversión por edición de venta #${editingSaleId}`, localDateTime()]);
+        }
+      }
+      run("DELETE FROM sale_items WHERE sale_id=?", [editingSaleId]);
+      run("DELETE FROM payments WHERE sale_id=?", [editingSaleId]);
+      run(`UPDATE sales SET customer_id=?,subtotal=?,discount=?,total=?,status='completed',net_subtotal=?,tax=?,document_type=?,folio=? WHERE id=?`,
+        [customerId, subtotal, discount, total, netAfterDiscount, taxAfterDiscount, saleDocumentType, saleFolio || null, editingSaleId]);
+    } else {
+      run(`INSERT INTO sales(customer_id,date,subtotal,discount,total,status,net_subtotal,tax,document_type,folio)
+        VALUES(?,?,?,?,?,'completed',?,?,?,?)`,
+      [customerId, localDateTime(), subtotal, discount, total, netAfterDiscount, taxAfterDiscount, saleDocumentType, saleFolio || null]);
+      saleId = query("SELECT id FROM sales ORDER BY id DESC LIMIT 1")[0].id;
+    }
     for (let index = 0; index < saleCart.length; index += 1) {
       const item = saleCart[index];
       run(`INSERT INTO sale_items(sale_id,product_id,product_name,quantity,unit_price,line_total,unit_cost)
         VALUES(?,?,?,?,?,?,?)`,
       [saleId, item.id, item.name, item.quantity, item.price, lineTotals[index], item.cost]);
-      run("INSERT INTO stock_movements(product_id,type,quantity,note,date) VALUES(?,'sale',?,?,?)", [item.id, -item.quantity, `Venta #${saleId}`, localDateTime()]);
+      run("INSERT INTO stock_movements(product_id,type,quantity,note,date) VALUES(?,'sale',?,?,?)", [item.id, -item.quantity, wasEditing ? `Venta #${saleId} (editada)` : `Venta #${saleId}`, localDateTime()]);
     }
     for (const payment of recordedPayments) {
       if (payment.amount > 0) run("INSERT INTO payments(sale_id,type,amount,reference) VALUES(?,?,?,?)", [saleId, payment.type, payment.amount, payment.reference || null]);
@@ -1154,8 +1334,109 @@ function saveSale() {
   saleDiscount = "0";
   saleDocumentType = "BOLETA";
   saleFolio = "";
+  editingSaleId = null;
   render();
-  notify("Venta registrada. El historial y el stock se actualizaron.");
+  notify(wasEditing ? "Venta actualizada. El historial y el stock se actualizaron." : "Venta registrada. El historial y el stock se actualizaron.");
+}
+
+function startEditSale(saleId) {
+  const sale = query("SELECT * FROM sales WHERE id=?", [saleId])[0];
+  if (!sale) throw new Error("No se encontró la venta seleccionada.");
+  const items = query(`SELECT si.product_id,si.product_name,si.quantity,si.unit_price,si.unit_cost,
+      p.stock,p.unit,p.net_price,p.tax_exempt
+    FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
+    WHERE si.sale_id=? ORDER BY si.id`, [saleId]);
+  const payments = query("SELECT type,amount,reference FROM payments WHERE sale_id=? ORDER BY id", [saleId]);
+  const qtyByProduct = new Map();
+  for (const item of items) {
+    qtyByProduct.set(Number(item.product_id), (qtyByProduct.get(Number(item.product_id)) || 0) + Number(item.quantity));
+  }
+  editingSaleId = Number(sale.id);
+  saleCart = items.map((item) => {
+    const restoredStock = (Number(item.stock) || 0) + (qtyByProduct.get(Number(item.product_id)) || 0);
+    return {
+      id: Number(item.product_id),
+      name: item.product_name,
+      price: Number(item.unit_price),
+      stock: restoredStock,
+      unit: item.unit || "UN",
+      cost: Number(item.unit_cost) || 0,
+      netPrice: Number(item.net_price) || Number(item.unit_price),
+      taxExempt: Boolean(item.tax_exempt),
+      quantity: Number(item.quantity)
+    };
+  });
+  paymentRows = payments.length
+    ? payments.map((p) => ({ type: p.type, amount: String(p.amount), reference: p.reference || "" }))
+    : [{ type: "Efectivo", amount: String(sale.total) }];
+  saleCustomerId = sale.customer_id ? String(sale.customer_id) : "";
+  saleDiscount = String(sale.discount || 0);
+  saleDocumentType = sale.document_type || "BOLETA";
+  saleFolio = sale.folio || "";
+  currentView = "sales";
+  searchValue = "";
+  render();
+  notify(`Editando la venta #${sale.id}.`);
+}
+
+function cancelEditSale() {
+  saleCart = [];
+  paymentRows = [{ type: "Efectivo", amount: "" }];
+  saleCustomerId = "";
+  saleDiscount = "0";
+  saleDocumentType = "BOLETA";
+  saleFolio = "";
+  editingSaleId = null;
+  render();
+  notify("Edición de venta cancelada.");
+}
+
+function openDeleteSaleModal(saleId) {
+  const sale = query(`SELECT s.id,s.date,s.total,c.name AS customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id WHERE s.id=?`, [saleId])[0];
+  if (!sale) throw new Error("No se encontró la venta seleccionada.");
+  const content = `<div class="modal-form">
+    <p class="confirm-message">¿Estás seguro de eliminar la venta <strong>#${sale.id}</strong> por <strong>${money(sale.total)}</strong> (${escapeHtml(sale.customer || "Venta sin cliente")})?</p>
+    <p class="confirm-note">Esta acción eliminará el registro de la venta y devolverá los productos al stock del inventario.</p>
+    <div class="modal-actions">
+      <button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button>
+      <button type="button" class="button button-danger button-small" data-action="delete-sale" data-id="${sale.id}">Sí, eliminar venta</button>
+    </div>
+  </div>`;
+  modal("¿Estás seguro de eliminar la venta?", "Confirma antes de borrar definitivamente este registro.", content);
+}
+
+function deleteSale(saleId) {
+  const sale = query("SELECT id,status FROM sales WHERE id=?", [saleId])[0];
+  if (!sale) throw new Error("No se encontró la venta que intentas eliminar.");
+  const items = query("SELECT product_id, SUM(quantity) AS quantity FROM sale_items WHERE sale_id=? GROUP BY product_id", [saleId]);
+  try {
+    db.run("BEGIN TRANSACTION");
+    if (sale.status === "completed") {
+      for (const item of items) {
+        const qty = Number(item.quantity) || 0;
+        if (qty > 0) {
+          run("INSERT INTO stock_movements(product_id,type,quantity,note,date) VALUES(?,'adjustment',?,?,?)", [item.product_id, qty, `Devolución de stock por eliminación de venta #${saleId}`, localDateTime()]);
+        }
+      }
+    }
+    run("DELETE FROM sales WHERE id=?", [saleId]);
+    db.run("COMMIT");
+  } catch (error) {
+    try { db.run("ROLLBACK"); } catch (rollbackError) { console.error(rollbackError); }
+    throw error;
+  }
+  if (editingSaleId === Number(saleId)) {
+    saleCart = [];
+    paymentRows = [{ type: "Efectivo", amount: "" }];
+    saleCustomerId = "";
+    saleDiscount = "0";
+    saleDocumentType = "BOLETA";
+    saleFolio = "";
+    editingSaleId = null;
+  }
+  closeModal();
+  render();
+  notify(`Venta #${saleId} eliminada y stock restaurado.`);
 }
 
 function saveCustomer(form) {
@@ -1194,19 +1475,51 @@ function saveExpense(form) {
   notify("Gasto registrado.");
 }
 
-function addProductToCart(productId) {
+function addProductToCart(productId, keepFocusSelector = null) {
   const product = query("SELECT id,name,price,stock,unit,cost,net_price,tax_exempt FROM products WHERE id=?", [productId])[0];
   if (!product) throw new Error("No se encontró el producto.");
+  const originalQty = editingSaleId
+    ? Number(query("SELECT COALESCE(SUM(quantity),0) AS quantity FROM sale_items WHERE sale_id=? AND product_id=?", [editingSaleId, productId])[0]?.quantity) || 0
+    : 0;
+  const availableStock = Number(product.stock) + originalQty;
   const item = saleCart.find((entry) => entry.id === product.id);
   const step = product.unit === "UN" || product.unit === "CAJA" ? 1 : 0.25;
-  if (product.stock < (item?.quantity || 0) + step) throw new Error(`No hay suficiente stock para agregar más de «${product.name}».`);
-  if (item) item.quantity += step;
-  else saleCart.push({
-    id: product.id, name: product.name, price: product.price, stock: product.stock,
+  if (availableStock < (item?.quantity || 0) + step) throw new Error(`No hay suficiente stock para agregar más de «${product.name}».`);
+  if (item) {
+    item.stock = availableStock;
+    item.quantity += step;
+  } else saleCart.push({
+    id: product.id, name: product.name, price: product.price, stock: availableStock,
     unit: product.unit, cost: product.cost, netPrice: product.net_price,
     taxExempt: Boolean(product.tax_exempt), quantity: step
   });
   render();
+  if (keepFocusSelector) $(keepFocusSelector)?.focus();
+}
+
+function addProductByBarcode(code, keepSearchFocus = true) {
+  const cleanCode = String(code || "").trim();
+  if (!cleanCode) return false;
+  const normalized = cleanCode.toLocaleLowerCase("es");
+  const product = query("SELECT id,name,barcode,sku FROM products WHERE active=1").find((item) =>
+    String(item.barcode || "").trim().toLocaleLowerCase("es") === normalized ||
+    String(item.sku || "").trim().toLocaleLowerCase("es") === normalized
+  );
+  if (!product) {
+    notify(`No se encontró ningún producto con el código «${cleanCode}».`, "error");
+    if (keepSearchFocus) {
+      const searchInput = $("#table-search");
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.select();
+      }
+    }
+    return false;
+  }
+  searchValue = "";
+  addProductToCart(product.id, keepSearchFocus ? "#table-search" : null);
+  notify(`Agregado: ${product.name}`);
+  return true;
 }
 
 function bindEvents() {
@@ -1283,7 +1596,13 @@ function bindEvents() {
         customerHistoryId = null;
         render();
       } else if (action === "add-cart") addProductToCart(Number(button.dataset.id));
-      else if (action === "cart-qty") {
+      else if (action === "edit-sale") startEditSale(Number(button.dataset.id));
+      else if (action === "cancel-edit-sale") cancelEditSale();
+      else if (action === "confirm-delete-sale") openDeleteSaleModal(Number(button.dataset.id));
+      else if (action === "remove-cart-item") {
+        saleCart = saleCart.filter((entry) => entry.id !== Number(button.dataset.id));
+        render();
+      } else if (action === "cart-qty") {
         const item = saleCart.find((entry) => entry.id === Number(button.dataset.id));
         if (item) {
           item.quantity += Number(button.dataset.change);
@@ -1291,7 +1610,7 @@ function bindEvents() {
           render();
         }
       } else if (action === "add-payment") {
-        paymentRows.push({ type: "Transferencia", amount: "", reference: "" });
+        paymentRows.push({ type: "Transferencia", amount: "" });
         render();
       } else if (action === "remove-payment") {
         const index = Number(button.dataset.index);
@@ -1312,10 +1631,6 @@ function bindEvents() {
       const input = $("#table-search");
       input?.focus();
       input?.setSelectionRange(selection, selection);
-    }
-    if (event.target.matches("[data-payment-reference]")) {
-      paymentRows[Number(event.target.dataset.paymentReference)].reference = event.target.value;
-      return;
     }
     if (event.target.id === "sale-discount" || event.target.matches("[data-payment-amount]")) {
       const input = event.target;
@@ -1374,7 +1689,58 @@ function bindEvents() {
     }
   });
   $("#modal-root").addEventListener("click", (event) => {
-    if (event.target.closest('[data-action="close-modal"]')) closeModal();
+    if (event.target.closest('[data-action="close-modal"]')) {
+      closeModal();
+      return;
+    }
+    const deleteButton = event.target.closest('[data-action="delete-sale"]');
+    if (deleteButton) {
+      try {
+        deleteSale(Number(deleteButton.dataset.id));
+      } catch (error) {
+        showError(error, "No se pudo eliminar la venta.");
+      }
+    }
+  });
+  $("#page-content").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    if (event.target.id === "table-search" && currentView === "sales") {
+      const code = event.target.value.trim();
+      if (!code) return;
+      event.preventDefault();
+      try {
+        addProductByBarcode(code, true);
+      } catch (error) {
+        showError(error, "No se pudo agregar el producto escaneado.");
+      }
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (currentView !== "sales" || !databaseReady() || $("#modal-root").children.length > 0) return;
+    const tag = event.target?.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+    const now = performance.now();
+    if (event.key === "Enter") {
+      if (barcodeBuffer.length >= 3 && now - barcodeLastKeyTime < 150) {
+        event.preventDefault();
+        const scanned = barcodeBuffer;
+        barcodeBuffer = "";
+        try {
+          addProductByBarcode(scanned, true);
+        } catch (error) {
+          showError(error, "No se pudo agregar el producto escaneado.");
+        }
+      } else {
+        barcodeBuffer = "";
+      }
+      return;
+    }
+    if (event.key.length === 1) {
+      if (now - barcodeLastKeyTime > 120) barcodeBuffer = "";
+      barcodeBuffer += event.key;
+      barcodeLastKeyTime = now;
+    }
   });
 }
 

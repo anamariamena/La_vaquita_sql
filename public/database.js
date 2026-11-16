@@ -417,17 +417,34 @@
           COALESCE(NEW.net_subtotal,NEW.subtotal,0),COALESCE(NEW.tax,0),COALESCE(NEW.discount,0),
           NEW.total,CASE NEW.status WHEN 'cancelled' THEN 'ANULADA' WHEN 'pending' THEN 'PENDIENTE' ELSE 'COMPLETADA' END);
       END;
+      CREATE TRIGGER IF NOT EXISTS sales_update INSTEAD OF UPDATE ON sales BEGIN
+        UPDATE ventas SET id_cliente=NEW.customer_id,tipo_documento=COALESCE(NEW.document_type,'BOLETA'),
+          folio_documento=NEW.folio,fecha_venta=COALESCE(NEW.date,fecha_venta),
+          subtotal_neto=COALESCE(NEW.net_subtotal,NEW.subtotal,0),total_iva=COALESCE(NEW.tax,0),
+          descuento_global=COALESCE(NEW.discount,0),total_venta=NEW.total,
+          estado=CASE NEW.status WHEN 'cancelled' THEN 'ANULADA' WHEN 'pending' THEN 'PENDIENTE' ELSE 'COMPLETADA' END
+        WHERE id_venta=OLD.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS sales_delete INSTEAD OF DELETE ON sales BEGIN
+        DELETE FROM ventas WHERE id_venta=OLD.id;
+      END;
       CREATE TRIGGER IF NOT EXISTS sale_items_insert INSTEAD OF INSERT ON sale_items BEGIN
         INSERT INTO detalle_ventas(id_venta,id_producto,cantidad,precio_unitario_venta,
           costo_unitario_historico,descuento_linea,subtotal)
         VALUES(NEW.sale_id,NEW.product_id,NEW.quantity,NEW.unit_price,COALESCE(NEW.unit_cost,0),
           COALESCE(NEW.line_discount,0),NEW.line_total);
       END;
+      CREATE TRIGGER IF NOT EXISTS sale_items_delete INSTEAD OF DELETE ON sale_items BEGIN
+        DELETE FROM detalle_ventas WHERE id_detalle_venta=OLD.id;
+      END;
       CREATE TRIGGER IF NOT EXISTS payments_insert INSTEAD OF INSERT ON payments BEGIN
         INSERT INTO pagos_venta(id_venta,metodo_pago,monto,referencia_transaccion)
         VALUES(NEW.sale_id,CASE NEW.type WHEN 'Efectivo' THEN 'EFECTIVO' WHEN 'Débito' THEN 'DEBITO'
           WHEN 'Crédito' THEN 'CREDITO' WHEN 'Transferencia' THEN 'TRANSFERENCIA' ELSE 'CREDITO_INTERNO' END,
           NEW.amount,NEW.reference);
+      END;
+      CREATE TRIGGER IF NOT EXISTS payments_delete INSTEAD OF DELETE ON payments BEGIN
+        DELETE FROM pagos_venta WHERE id_pago=OLD.id;
       END;
       CREATE TRIGGER IF NOT EXISTS stock_movements_insert INSTEAD OF INSERT ON stock_movements BEGIN
         INSERT INTO compras(id_proveedor,id_usuario,tipo_documento,folio_documento,total_neto,total_iva,total_compra)
