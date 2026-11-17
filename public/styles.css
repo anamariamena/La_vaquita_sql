@@ -168,6 +168,41 @@ h1 span { color: var(--color-primary); }
 .finance-bar-losses { fill: #c65c54; }
 .finance-zero-line { stroke: #bdc7be; stroke-width: 1.2; }
 .finance-chart { height: 260px; }
+.finance-month-panel { overflow: hidden; border-width: 2px; box-shadow: 0 12px 32px #26332a1a; }
+.finance-month-panel.finance-profit-low { border-color: #d66b65; }
+.finance-month-panel.finance-profit-medium { border-color: #e6bd43; }
+.finance-month-panel.finance-profit-high { border-color: #69a879; }
+.finance-month-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 22px 24px 18px; border-bottom: 1px solid #f0dce6; }
+.finance-month-title h2 { margin: 0; color: var(--color-text-dark); font: 700 17px "Montserrat", sans-serif; letter-spacing: .03em; text-transform: uppercase; }
+.finance-month-title p { margin: 6px 0 0; color: var(--color-text-muted); font-size: 11px; }
+.finance-month-result { flex: 0 0 auto; min-width: 235px; padding: 14px 18px; border-radius: 15px; text-align: right; }
+.finance-result-low { background: #fcebea; color: #a8322c; }
+.finance-result-medium { background: #fff4d5; color: #795800; }
+.finance-result-high { background: #e8f4e9; color: #2f7040; }
+.finance-month-result span, .finance-month-result strong, .finance-month-result small { display: block; }
+.finance-month-result span { font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.finance-month-result strong { margin: 3px 0; font: 700 28px "Montserrat", sans-serif; }
+.finance-month-result small { font-size: 9px; }
+.finance-month-metrics { display: flex; gap: 28px; padding: 15px 24px 12px; }
+.finance-month-metrics span, .finance-month-metrics small, .finance-month-metrics strong { display: block; }
+.finance-month-metrics small { color: #849088; font-size: 9px; }
+.finance-month-metrics strong { margin-top: 3px; color: var(--color-text-dark); font: 700 14px "Montserrat", sans-serif; }
+.finance-profit-scale { padding: 0 27px 5px; }
+.finance-profit-track { position: relative; display: flex; height: 13px; overflow: visible; border-radius: 20px; background: #edf0ed; }
+.finance-profit-track i { display: block; height: 100%; }
+.finance-profit-zone-low { border-radius: 20px 0 0 20px; background: #d66b65; }
+.finance-profit-zone-medium { background: #f0c64c; }
+.finance-profit-zone-high { border-radius: 0 20px 20px 0; background: #69a879; }
+.finance-profit-track b { position: absolute; top: -5px; width: 4px; height: 23px; border: 1px solid white; border-radius: 3px; background: #26332a; box-shadow: 0 1px 4px #26332a66; transform: translateX(-50%); }
+.finance-profit-labels { position: relative; height: 18px; margin-top: 5px; color: #78857d; font-size: 9px; }
+.finance-profit-labels span { position: absolute; white-space: nowrap; }
+.finance-profit-labels span:nth-child(1) { left: 0; }
+.finance-profit-labels span:nth-child(2), .finance-profit-labels span:nth-child(3) { transform: translateX(-50%); }
+.finance-profit-labels span:nth-child(4) { right: 0; }
+.finance-month-chart-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 13px 24px 0; color: var(--color-text-dark); font-size: 10px; }
+.finance-month-chart-heading span { color: #849088; font-size: 9px; }
+.finance-month-chart { height: 260px; padding: 4px 14px 10px; }
+.finance-month-sales-bar { fill: var(--color-primary); }
 .list-panel { padding-bottom: 5px; }
 .stock-list { padding: 0 17px; }
 .stock-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid #f0f2ef; }
@@ -349,12 +384,13 @@ h1 span { color: var(--color-primary); }
 .chart-range-button { border-radius: 50px; color: var(--color-text-muted); }
 .chart-range-button:hover { color: var(--color-accent-magenta); }
 .chart-range-button.active { background: var(--color-primary); color: white; box-shadow: none; }
-.legend-dot.positive, .chart-positive { background: var(--color-primary); stroke: var(--color-primary); }
-.legend-dot.negative, .chart-negative { background: var(--color-accent-magenta); stroke: var(--color-accent-magenta); }
-.legend-dot.finance-earnings, .finance-bar-earnings { background: var(--color-primary); fill: var(--color-primary); }
-.legend-dot.finance-purchases, .finance-bar-purchases { background: var(--color-secondary-warm); fill: var(--color-secondary-warm); }
-.chart-dot.chart-positive { stroke: var(--color-primary); }
-.finance-bar-losses { fill: var(--color-accent-magenta); }
+.legend-dot.positive, .chart-positive { background: #568366; stroke: #568366; }
+.legend-dot.negative, .chart-negative { background: #c65c54; stroke: #c65c54; }
+.legend-dot.finance-earnings, .finance-bar-earnings { background: #568366; fill: #568366; }
+.legend-dot.finance-purchases, .finance-bar-purchases { background: #f0c64c; fill: #f0c64c; }
+.chart-dot.chart-positive { stroke: #568366; }
+.chart-dot.chart-negative { stroke: #c65c54; }
+.finance-bar-losses { fill: #c65c54; }
 .stock-group-critical .stock-state-dot, .stock-group-critical .stock-count { background-color: var(--color-accent-magenta); color: white; }
 .stock-group-low .stock-state-dot { background: var(--color-secondary-warm); }
 .stock-group-suggestion .stock-state-dot { background: var(--color-primary); }
@@ -486,6 +522,13 @@ h1 span { color: var(--color-primary); }
   .stat-value { font-size: 19px; }
   .dashboard-grid, .content-grid, .analysis-columns, .finance-kpi-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .chart-wrap { height: 180px; }
+  .finance-month-heading { align-items: stretch; flex-direction: column; gap: 12px; padding: 18px 16px 14px; }
+  .finance-month-title h2 { font-size: 15px; }
+  .finance-month-result { width: 100%; min-width: 0; text-align: left; }
+  .finance-month-metrics { gap: 20px; padding-right: 16px; padding-left: 16px; }
+  .finance-profit-scale { padding-right: 19px; padding-left: 19px; }
+  .finance-month-chart-heading { padding-right: 16px; padding-left: 16px; }
+  .finance-month-chart { height: 180px; padding-right: 5px; padding-left: 5px; }
   .table-toolbar { flex-wrap: wrap; }
   .search-field { width: 100%; }
   .sales-export-controls { gap: 8px; }

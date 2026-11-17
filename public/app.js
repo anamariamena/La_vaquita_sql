@@ -1028,8 +1028,69 @@ function renderFinances() {
   const expenses = query("SELECT id,date,category,description,amount FROM expenses ORDER BY id DESC LIMIT 50");
   const rows = expenses.length ? expenses.map((expense) => `<tr><td>${dateLabel(expense.date)}</td><td><strong>${escapeHtml(expense.category)}</strong></td><td>${escapeHtml(expense.description)}</td><td>${money(expense.amount)}</td></tr>`).join("") : `<tr><td colspan="4">${emptyState("Sin gastos registrados", "Agrega gastos para tener una vista clara de tus finanzas.")}</td></tr>`;
   const monthLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(today);
+  const profitStatus = profit < 2_000_000
+    ? { className: "low", label: "Menos de $2.000.000" }
+    : profit <= 6_000_000
+      ? { className: "medium", label: "Entre $2.000.000 y $6.000.000" }
+      : { className: "high", label: "Más de $6.000.000" };
+  const profitScaleMax = Math.max(8_000_000, Math.ceil(Math.max(0, profit) / 2_000_000) * 2_000_000);
+  const profitMarker = Math.max(0, Math.min(100, (profit / profitScaleMax) * 100));
+  const lowZoneWidth = (2_000_000 / profitScaleMax) * 100;
+  const mediumZoneWidth = (4_000_000 / profitScaleMax) * 100;
+  const highZoneWidth = 100 - lowZoneWidth - mediumZoneWidth;
+  const dailySales = query(`SELECT substr(date,1,10) AS day, SUM(total) AS sales
+    FROM sales
+    WHERE status='completed' AND substr(date,1,7)=?
+    GROUP BY substr(date,1,10)`, [currentMonth]);
+  const dailySalesByDate = new Map(dailySales.map((row) => [row.day, Number(row.sales) || 0]));
+  const salesDays = Array.from({ length: today.getDate() }, (_, index) => {
+    const key = dateKey(new Date(today.getFullYear(), today.getMonth(), index + 1));
+    return { day: index + 1, sales: dailySalesByDate.get(key) || 0 };
+  });
+  const salesChartWidth = 780;
+  const salesChartHeight = 240;
+  const salesChartLeft = 54;
+  const salesChartRight = 766;
+  const salesChartTop = 24;
+  const salesChartBottom = 190;
+  const salesMax = Math.max(...salesDays.map((day) => day.sales), 1);
+  const salesGroupWidth = (salesChartRight - salesChartLeft) / salesDays.length;
+  const salesBarWidth = Math.min(18, salesGroupWidth * 0.65);
+  const salesY = (value) => salesChartBottom - (value / salesMax) * (salesChartBottom - salesChartTop);
+  const salesGrid = [0, 1, 2, 3, 4].map((index) => {
+    const value = salesMax * (4 - index) / 4;
+    const y = salesChartTop + index * (salesChartBottom - salesChartTop) / 4;
+    return `<line x1="${salesChartLeft}" y1="${y}" x2="${salesChartRight}" y2="${y}" class="chart-gridline"/><text x="${salesChartLeft - 8}" y="${y + 3}" text-anchor="end" class="chart-text">${escapeHtml(shortMoney(value))}</text>`;
+  }).join("");
+  const salesBars = salesDays.map((day, index) => {
+    const x = salesChartLeft + salesGroupWidth * index + (salesGroupWidth - salesBarWidth) / 2;
+    const y = salesY(day.sales);
+    const label = String(day.day).padStart(2, "0");
+    const bar = day.sales > 0
+      ? `<rect x="${x}" y="${y}" width="${salesBarWidth}" height="${salesChartBottom - y}" rx="3" class="finance-month-sales-bar"><title>${label} ${monthLabel} · Ventas: ${escapeHtml(money(day.sales))}</title></rect>`
+      : "";
+    const tick = index % 5 === 0 || index === salesDays.length - 1
+      ? `<text x="${x + salesBarWidth / 2}" y="216" text-anchor="middle" class="chart-text">${day.day}</text>`
+      : "";
+    return `${bar}${tick}`;
+  }).join("");
+  const monthlySalesChart = `<svg viewBox="0 0 ${salesChartWidth} ${salesChartHeight}" role="img" aria-label="Ventas completadas por día durante ${escapeHtml(monthLabel)}">${salesGrid}${salesBars}</svg>`;
+  const monthlyResultChart = `<section class="panel finance-month-panel finance-profit-${profitStatus.className} section-spacer">
+    <div class="finance-month-heading">
+      <div class="finance-month-title"><span class="heading-eyebrow">RESULTADOS DEL MES</span><h2>Ventas y ganancias de ${escapeHtml(monthLabel)}</h2><p>Ventas completadas por día y utilidad neta acumulada del mes.</p></div>
+      <div class="finance-month-result finance-result-${profitStatus.className}"><span>Ganancia neta</span><strong>${money(profit)}</strong><small>${profitStatus.label}</small></div>
+    </div>
+    <div class="finance-month-metrics"><span><small>Ventas completadas</small><strong>${monthTxCount}</strong></span><span><small>Ingresos por ventas</small><strong>${money(monthSales)}</strong></span></div>
+    <div class="finance-profit-scale" role="img" aria-label="Ganancia neta ${escapeHtml(money(profit))}. ${profitStatus.label}.">
+      <div class="finance-profit-track"><i class="finance-profit-zone-low" style="width:${lowZoneWidth}%"></i><i class="finance-profit-zone-medium" style="width:${mediumZoneWidth}%"></i><i class="finance-profit-zone-high" style="width:${highZoneWidth}%"></i><b style="left:${profitMarker}%"></b></div>
+      <div class="finance-profit-labels"><span>0</span><span style="left:${lowZoneWidth}%">$2M</span><span style="left:${lowZoneWidth + mediumZoneWidth}%">$6M</span><span>Más</span></div>
+    </div>
+    <div class="finance-month-chart-heading"><b>Ventas diarias</b><span>Pesos chilenos · día del mes</span></div>
+    <div class="chart-wrap finance-month-chart">${monthlySalesChart}</div>
+  </section>`;
 
   return `${pageHeading("INDICADORES CLAVE (KPI)", "Finanzas", ` Estado de resultados, rentabilidad y métricas clave de ${monthLabel}.`, `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
+    ${monthlyResultChart}
     <section class="stats-grid">
       ${statCard("Ingresos del mes", money(monthSales), deltaBadge(monthSales, prevMonthSales), "↗")}
       ${statCard("Utilidad bruta", money(grossProfit), `Margen bruto: ${pct(grossMarginPct)} · Costo: ${money(monthCost)}`, "◈")}
