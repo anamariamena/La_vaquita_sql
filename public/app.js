@@ -870,32 +870,47 @@ function renderFinances() {
     return `${sign}${pct(diff)} vs. mes anterior (${money(previous)})`;
   };
 
-  const recentSales = Number(scalar(`SELECT COALESCE(SUM(total),0) AS value FROM sales
-    WHERE status='completed' AND substr(date,1,10) BETWEEN ? AND ?`, [firstDayKey, todayKey])) || 0;
-  const recentLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
-    FROM stock_movements WHERE type='loss' AND substr(date,1,10) BETWEEN ? AND ?`, [firstDayKey, todayKey])) || 0;
-
-  const monthSales = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [currentMonth])) || 0;
-  const prevMonthSales = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [prevMonth])) || 0;
-  const monthTxCount = Number(scalar("SELECT COUNT(*) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [currentMonth])) || 0;
-  const prevMonthTxCount = Number(scalar("SELECT COUNT(*) AS value FROM sales WHERE status='completed' AND substr(date,1,7)=?", [prevMonth])) || 0;
-  const monthUnitsSold = Number(scalar(`SELECT COALESCE(SUM(si.quantity),0) AS value
-    FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    WHERE s.status='completed' AND substr(s.date,1,7)=?`, [currentMonth])) || 0;
-  const monthCost = Number(scalar(`SELECT COALESCE(SUM(si.quantity*si.unit_cost),0) AS value
-    FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    WHERE s.status='completed' AND substr(s.date,1,7)=?`, [currentMonth])) || 0;
-  const prevMonthCost = Number(scalar(`SELECT COALESCE(SUM(si.quantity*si.unit_cost),0) AS value
-    FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    WHERE s.status='completed' AND substr(s.date,1,7)=?`, [prevMonth])) || 0;
-  const monthExpenses = Number(scalar("SELECT COALESCE(SUM(amount),0) AS value FROM expenses WHERE substr(date,1,7)=?", [currentMonth])) || 0;
-  const prevMonthExpenses = Number(scalar("SELECT COALESCE(SUM(amount),0) AS value FROM expenses WHERE substr(date,1,7)=?", [prevMonth])) || 0;
-  const monthLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
-    FROM stock_movements WHERE type='loss' AND substr(date,1,7)=?`, [currentMonth])) || 0;
-  const prevMonthLosses = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
-    FROM stock_movements WHERE type='loss' AND substr(date,1,7)=?`, [prevMonth])) || 0;
-  const monthPurchases = Number(scalar(`SELECT COALESCE(SUM(ABS(quantity)*COALESCE(cost,0)),0) AS value
-    FROM stock_movements WHERE type='entry' AND substr(date,1,7)=?`, [currentMonth])) || 0;
+  const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total) AS sales,
+      SUM(COALESCE(i.cost,0)) AS cost, SUM(COALESCE(i.units,0)) AS units, COUNT(*) AS transactions,
+      SUM(CASE WHEN substr(s.date,1,10) BETWEEN ? AND ? THEN s.total ELSE 0 END) AS recent_sales
+    FROM sales s LEFT JOIN (
+      SELECT si.sale_id, SUM(si.quantity*si.unit_cost) AS cost, SUM(si.quantity) AS units
+      FROM sale_items si JOIN sales filtered ON filtered.id=si.sale_id
+      WHERE filtered.status='completed' AND substr(filtered.date,1,7)>=? AND substr(filtered.date,1,7)<=?
+      GROUP BY si.sale_id
+    ) i ON i.sale_id=s.id
+    WHERE s.status='completed' AND substr(s.date,1,7)>=? AND substr(s.date,1,7)<=?
+    GROUP BY substr(s.date,1,7)`, [firstDayKey, todayKey, firstMonth, currentMonth, firstMonth, currentMonth]);
+  const monthlyMovements = query(`SELECT substr(date,1,7) AS month,
+      SUM(CASE WHEN type='loss' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS losses,
+      SUM(CASE WHEN type='entry' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS purchases,
+      SUM(CASE WHEN type='loss' AND substr(date,1,10) BETWEEN ? AND ?
+        THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS recent_losses
+    FROM stock_movements
+    WHERE type IN ('loss','entry') AND substr(date,1,7)>=? AND substr(date,1,7)<=?
+    GROUP BY substr(date,1,7)`, [firstDayKey, todayKey, firstMonth, currentMonth]);
+  const monthlyExpenses = query(`SELECT substr(date,1,7) AS month, SUM(amount) AS amount
+    FROM expenses WHERE substr(date,1,7)>=? AND substr(date,1,7)<=?
+    GROUP BY substr(date,1,7)`, [firstMonth, currentMonth]);
+  const salesByMonth = new Map(monthlySales.map((row) => [row.month, row]));
+  const movementsByMonth = new Map(monthlyMovements.map((row) => [row.month, row]));
+  const expensesByMonth = new Map(monthlyExpenses.map((row) => [row.month, Number(row.amount) || 0]));
+  const salesForMonth = (month) => salesByMonth.get(month) || {};
+  const movementsForMonth = (month) => movementsByMonth.get(month) || {};
+  const monthSales = Number(salesForMonth(currentMonth).sales) || 0;
+  const prevMonthSales = Number(salesForMonth(prevMonth).sales) || 0;
+  const monthTxCount = Number(salesForMonth(currentMonth).transactions) || 0;
+  const prevMonthTxCount = Number(salesForMonth(prevMonth).transactions) || 0;
+  const monthUnitsSold = Number(salesForMonth(currentMonth).units) || 0;
+  const monthCost = Number(salesForMonth(currentMonth).cost) || 0;
+  const prevMonthCost = Number(salesForMonth(prevMonth).cost) || 0;
+  const monthExpenses = expensesByMonth.get(currentMonth) || 0;
+  const prevMonthExpenses = expensesByMonth.get(prevMonth) || 0;
+  const monthLosses = Number(movementsForMonth(currentMonth).losses) || 0;
+  const prevMonthLosses = Number(movementsForMonth(prevMonth).losses) || 0;
+  const monthPurchases = Number(movementsForMonth(currentMonth).purchases) || 0;
+  const recentSales = monthlySales.reduce((sum, row) => sum + (Number(row.recent_sales) || 0), 0);
+  const recentLosses = monthlyMovements.reduce((sum, row) => sum + (Number(row.recent_losses) || 0), 0);
 
   const grossProfit = monthSales - monthCost;
   const prevGrossProfit = prevMonthSales - prevMonthCost;
@@ -935,39 +950,18 @@ function renderFinances() {
     FROM expenses WHERE substr(date,1,7)=?
     GROUP BY category ORDER BY amount DESC`, [currentMonth]);
 
-  const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total) AS sales,
-      SUM(COALESCE(i.cost,0)) AS cost
-    FROM sales s LEFT JOIN (
-      SELECT sale_id,SUM(quantity*unit_cost) AS cost FROM sale_items GROUP BY sale_id
-    ) i ON i.sale_id=s.id
-    WHERE s.status='completed' AND substr(s.date,1,7)>=? AND substr(s.date,1,7)<=?
-    GROUP BY substr(s.date,1,7)`, [firstMonth, currentMonth]);
-  const monthlyLosses = query(`SELECT substr(date,1,7) AS month,
-      SUM(ABS(quantity)*COALESCE(cost,0)) AS amount
-    FROM stock_movements WHERE type='loss' AND substr(date,1,7)>=? AND substr(date,1,7)<=?
-    GROUP BY substr(date,1,7)`, [firstMonth, currentMonth]);
-  const monthlyExpenses = query(`SELECT substr(date,1,7) AS month,SUM(amount) AS amount
-    FROM expenses WHERE substr(date,1,7)>=? AND substr(date,1,7)<=?
-    GROUP BY substr(date,1,7)`, [firstMonth, currentMonth]);
-  const monthlyPurchases = query(`SELECT substr(date,1,7) AS month,
-      SUM(ABS(quantity)*COALESCE(cost,0)) AS amount
-    FROM stock_movements WHERE type='entry' AND substr(date,1,7)>=? AND substr(date,1,7)<=?
-    GROUP BY substr(date,1,7)`, [firstMonth, currentMonth]);
-  const salesByMonth = new Map(monthlySales.map((row) => [row.month, row]));
-  const lossesByMonth = new Map(monthlyLosses.map((row) => [row.month, Number(row.amount) || 0]));
-  const expensesByMonth = new Map(monthlyExpenses.map((row) => [row.month, Number(row.amount) || 0]));
-  const purchasesByMonth = new Map(monthlyPurchases.map((row) => [row.month, Number(row.amount) || 0]));
   const monthlyData = Array.from({ length: financeRange }, (_, index) => {
     const date = addMonths(new Date(today.getFullYear(), today.getMonth(), 1), index - financeRange + 1);
     const key = monthKey(date);
-    const sales = salesByMonth.get(key);
+    const sales = salesForMonth(key);
+    const movements = movementsForMonth(key);
     const earnings = (Number(sales?.sales) || 0) - (Number(sales?.cost) || 0);
-    const losses = (lossesByMonth.get(key) || 0) + (expensesByMonth.get(key) || 0);
+    const losses = (Number(movements.losses) || 0) + (expensesByMonth.get(key) || 0);
     return {
       label: new Intl.DateTimeFormat("es-CL", { month: "short", year: financeRange > 6 ? undefined : "2-digit" }).format(date).replace(".", ""),
       earnings,
       losses,
-      purchases: purchasesByMonth.get(key) || 0
+      purchases: Number(movements.purchases) || 0
     };
   });
   const chartWidth = 780;
