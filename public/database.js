@@ -107,6 +107,7 @@
       costo_unitario_historico REAL NOT NULL DEFAULT 0,
       descuento_linea REAL NOT NULL DEFAULT 0,
       subtotal REAL NOT NULL,
+      ingreso_neto REAL NOT NULL DEFAULT 0,
       FOREIGN KEY (id_venta) REFERENCES ventas(id_venta) ON DELETE CASCADE,
       FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
     );
@@ -181,6 +182,25 @@
   function run(database, sql, params = []) {
     if (params.length) database.run(sql, params);
     else database.run(sql);
+  }
+
+  function allocateAmount(total, weights) {
+    const amount = Math.max(0, Math.round(Number(total) || 0));
+    const normalizedWeights = weights.map((weight) => Math.max(0, Number(weight) || 0));
+    const weightTotal = normalizedWeights.reduce((sum, weight) => sum + weight, 0);
+    if (!amount || !weightTotal) return normalizedWeights.map(() => 0);
+
+    const allocations = normalizedWeights.map((weight, index) => {
+      const exactAmount = amount * weight / weightTotal;
+      const floorAmount = Math.floor(exactAmount);
+      return { index, amount: floorAmount, remainder: exactAmount - floorAmount };
+    });
+    let remaining = amount - allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
+    const byRemainder = [...allocations].sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+    for (let index = 0; remaining > 0; index += 1, remaining -= 1) {
+      byRemainder[index % byRemainder.length].amount += 1;
+    }
+    return allocations.sort((a, b) => a.index - b.index).map((allocation) => allocation.amount);
   }
 
   function tableType(database, name) {
@@ -314,8 +334,23 @@
     run(database, "INSERT INTO app_migrations(version) VALUES('legacy-v1')");
   }
 
+  function migrateLineNetRevenue(database) {
+    if (rows(database, "SELECT version FROM app_migrations WHERE version='sale-net-revenue-v1'").length) return;
+    const sales = rows(database, "SELECT id_venta,total_venta,total_iva FROM ventas");
+    for (const sale of sales) {
+      const items = rows(database, "SELECT id_detalle_venta,subtotal FROM detalle_ventas WHERE id_venta=? ORDER BY id_detalle_venta", [sale.id_venta]);
+      const netRevenue = Math.max(0, Number(sale.total_venta) - Number(sale.total_iva));
+      const allocations = allocateAmount(netRevenue, items.map((item) => item.subtotal));
+      for (let index = 0; index < items.length; index += 1) {
+        run(database, "UPDATE detalle_ventas SET ingreso_neto=? WHERE id_detalle_venta=?", [allocations[index], items[index].id_detalle_venta]);
+      }
+    }
+    run(database, "INSERT INTO app_migrations(version) VALUES('sale-net-revenue-v1')");
+  }
+
   function createCompatibilityViews(database) {
     const userId = Number(localUserId);
+    run(database, "DROP VIEW IF EXISTS sale_items; DROP VIEW IF EXISTS stock_movements;");
     const views = `
       CREATE VIEW IF NOT EXISTS products AS
         SELECT p.id_producto AS id,p.nombre AS name,COALESCE(p.sku,'') AS sku,COALESCE(c.nombre,'') AS category,
@@ -340,7 +375,7 @@
       CREATE VIEW IF NOT EXISTS sale_items AS
         SELECT d.id_detalle_venta AS id,d.id_venta AS sale_id,d.id_producto AS product_id,p.nombre AS product_name,
           d.cantidad AS quantity,d.precio_unitario_venta AS unit_price,d.subtotal AS line_total,
-          d.costo_unitario_historico AS unit_cost,d.descuento_linea AS line_discount
+          d.costo_unitario_historico AS unit_cost,d.descuento_linea AS line_discount,d.ingreso_neto AS net_revenue
         FROM detalle_ventas d JOIN productos p ON p.id_producto=d.id_producto;
       CREATE VIEW IF NOT EXISTS payments AS
         SELECT id_pago AS id,id_venta AS sale_id,
@@ -430,9 +465,9 @@
       END;
       CREATE TRIGGER IF NOT EXISTS sale_items_insert INSTEAD OF INSERT ON sale_items BEGIN
         INSERT INTO detalle_ventas(id_venta,id_producto,cantidad,precio_unitario_venta,
-          costo_unitario_historico,descuento_linea,subtotal)
+          costo_unitario_historico,descuento_linea,subtotal,ingreso_neto)
         VALUES(NEW.sale_id,NEW.product_id,NEW.quantity,NEW.unit_price,COALESCE(NEW.unit_cost,0),
-          COALESCE(NEW.line_discount,0),NEW.line_total);
+          COALESCE(NEW.line_discount,0),NEW.line_total,COALESCE(NEW.net_revenue,0));
       END;
       CREATE TRIGGER IF NOT EXISTS sale_items_delete INSTEAD OF DELETE ON sale_items BEGIN
         DELETE FROM detalle_ventas WHERE id_detalle_venta=OLD.id;
@@ -462,7 +497,7 @@
           CASE WHEN stock_actual<=0 THEN COALESCE(NEW.purchase_cost,costo_promedio)
             ELSE ((stock_actual*costo_promedio)+(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,costo_promedio)))
               /(stock_actual+ABS(NEW.quantity)) END
-        WHERE id_producto=NEW.product_id AND NEW.type='entry' AND NEW.supplier_id IS NOT NULL;
+        WHERE id_producto=NEW.product_id AND NEW.type='entry';
         INSERT INTO movimientos_inventario(id_producto,id_usuario,tipo_movimiento,cantidad,stock_anterior,
           stock_resultante,costo_unitario,referencia_origen,motivo,fecha)
         SELECT NEW.product_id,${userId},
@@ -511,6 +546,10 @@
     let legacy = getLegacyData(database);
     if (Object.keys(legacy).length) renameLegacyTables(database, legacy);
     run(database, schema);
+    const detailColumns = rows(database, "PRAGMA table_info(detalle_ventas)");
+    if (!detailColumns.some((column) => column.name === "ingreso_neto")) {
+      run(database, "ALTER TABLE detalle_ventas ADD COLUMN ingreso_neto REAL NOT NULL DEFAULT 0");
+    }
     await ensureLocalUser(database);
     legacy = migrationTables(database);
     if (Object.keys(legacy).length) {
@@ -523,6 +562,14 @@
         throw error;
       }
     }
+    run(database, "BEGIN TRANSACTION");
+    try {
+      migrateLineNetRevenue(database);
+      run(database, "COMMIT");
+    } catch (error) {
+      run(database, "ROLLBACK");
+      throw error;
+    }
     createCompatibilityViews(database);
     const missingTables = [
       "usuarios", "categorias", "proveedores", "clientes", "productos", "compras",
@@ -534,5 +581,5 @@
     return { userId: localUserId, journalMode };
   }
 
-  window.DatabaseLayer = { initialize };
+  window.DatabaseLayer = { allocateAmount, initialize };
 })();

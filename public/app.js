@@ -4,7 +4,8 @@ const TITLES = {
   sales: "Ventas",
   "sales-history": "Historial de ventas",
   products: "Productos",
-  finances: "Finanzas"
+  finances: "Finanzas",
+  "sql-console": "Consola SQL"
 };
 const PAYMENT_TYPES = ["Efectivo", "Débito", "Crédito", "Transferencia", "Otro"];
 const MOVEMENT_TYPES = [
@@ -48,6 +49,8 @@ let saleFolio = "";
 let editingSaleId = null;
 let customerHistoryId = null;
 let searchValue = "";
+let sqlConsoleInput = "";
+let sqlConsoleOutput = null;
 let barcodeBuffer = "";
 let barcodeLastKeyTime = 0;
 let toastTimer;
@@ -318,9 +321,65 @@ function render() {
     sales: renderSales,
     "sales-history": renderSalesHistory,
     products: renderProducts,
-    finances: renderFinances
+    finances: renderFinances,
+    "sql-console": renderSqlConsole
   };
   $("#page-content").innerHTML = pages[currentView]();
+}
+
+function renderSqlConsole() {
+  let output = `<p class="sql-console-placeholder">Los resultados de tus consultas aparecerán aquí.</p>`;
+  if (sqlConsoleOutput?.error) {
+    output = `<div class="sql-console-error" role="alert"><strong>No se pudo ejecutar el SQL.</strong><pre>${escapeHtml(sqlConsoleOutput.error)}</pre></div>`;
+  } else if (sqlConsoleOutput) {
+    const resultSets = sqlConsoleOutput.results;
+    output = resultSets.length
+      ? resultSets.map((result, index) => {
+        const rows = result.values.slice(0, 200);
+        const tableRows = rows.map((row) => `<tr>${row.map((value) => {
+          const text = value === null ? "NULL" : value instanceof Uint8Array ? `BLOB (${value.length} bytes)` : String(value);
+          return `<td>${escapeHtml(text)}</td>`;
+        }).join("")}</tr>`).join("");
+        return `<div class="sql-result-set"><div class="sql-result-heading">Resultado ${index + 1} · ${result.values.length} filas${result.values.length > rows.length ? " · mostrando las primeras 200" : ""}</div><div class="table-scroll"><table class="data-table sql-result-table"><thead><tr>${result.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${tableRows}</tbody></table></div></div>`;
+      }).join("")
+      : `<p class="sql-console-placeholder">SQL ejecutado correctamente. No se devolvieron filas.</p>`;
+  }
+  return `${pageHeading("HERRAMIENTAS AVANZADAS", "Consola SQL", "Ejecuta consultas directamente sobre la base de datos abierta.")}
+    <aside class="sql-console-warning" role="alert"><strong>Importante: realiza una copia de seguridad antes de usar esta consola.</strong><p>El SQL puede modificar o borrar datos y alterar la estructura de la base. No hay botón para deshacer y un error podría impedir que la aplicación vuelva a funcionar correctamente. Usa solo comandos que entiendas; los cambios se guardan automáticamente.</p></aside>
+    <article class="panel sql-console-panel">
+      <div class="panel-heading"><div><h2>Consulta SQL</h2><p>Usa Ctrl + Enter (o ⌘ + Enter) para ejecutar.</p></div></div>
+      <div class="sql-console-controls"><textarea id="sql-console-input" class="sql-console-input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Comando SQL" placeholder="SELECT name, stock FROM products LIMIT 20;">${escapeHtml(sqlConsoleInput)}</textarea>
+        <div class="sql-console-actions"><button class="button button-muted button-small" type="button" data-action="clear-sql">Limpiar</button><button class="button button-primary button-small" type="button" data-action="run-sql">Ejecutar SQL</button></div>
+      </div>
+    </article>
+    <article class="panel sql-console-output"><div class="panel-heading"><div><h2>Salida</h2></div></div><div class="sql-console-output-content">${output}</div></article>`;
+}
+
+function executeSqlConsole() {
+  const sql = sqlConsoleInput.trim();
+  if (!sql) {
+    sqlConsoleOutput = { error: "Escribe una consulta SQL antes de ejecutarla." };
+    render();
+    return;
+  }
+
+  const candidate = new SQL.Database(db.export());
+  try {
+    candidate.run("PRAGMA foreign_keys = ON");
+    candidate.run("SAVEPOINT sql_console_execution");
+    const results = candidate.exec(sql);
+    candidate.run("RELEASE sql_console_execution");
+    const previousDb = db;
+    db = candidate;
+    previousDb.close();
+    sqlConsoleOutput = { results };
+    scheduleAutoSave();
+  } catch (error) {
+    candidate.close();
+    sqlConsoleOutput = { error: error instanceof Error ? error.message : String(error) };
+    showError(error, "No se pudo ejecutar el SQL.");
+  }
+  render();
 }
 
 async function exitToWelcome(button) {
@@ -739,7 +798,7 @@ function renderSalesHistory() {
   const todayKey = dateKey(today);
   const monthStart = dateKey(new Date(today.getFullYear(), today.getMonth(), 1));
   const monthName = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(today);
-  const monthSales = query(`SELECT s.id,s.date,s.subtotal,s.discount,s.total,s.status,s.document_type,s.folio,c.name AS customer
+  const monthSales = query(`SELECT s.id,s.date,s.total+s.discount AS subtotal,s.discount,s.total,s.status,s.document_type,s.folio,c.name AS customer
     FROM sales s LEFT JOIN customers c ON c.id=s.customer_id
     WHERE substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?
     ORDER BY s.date DESC,s.id DESC`, [monthStart, todayKey]);
@@ -774,7 +833,7 @@ function exportSalesPeriod(start, end) {
     throw new Error("Selecciona una fecha de inicio y una fecha de término.");
   }
   if (start > end) throw new Error("La fecha de inicio no puede ser posterior a la fecha de término.");
-  const sales = query(`SELECT s.id,s.date,s.subtotal,s.discount,s.total,s.status,s.document_type,s.folio,c.name AS customer
+  const sales = query(`SELECT s.id,s.date,s.total+s.discount AS subtotal,s.discount,s.total,s.status,s.document_type,s.folio,c.name AS customer
     FROM sales s LEFT JOIN customers c ON c.id=s.customer_id
     WHERE substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?
     ORDER BY s.date,s.id`, [start, end]);
@@ -860,6 +919,8 @@ function renderFinances() {
   const prevMonthDate = addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -1);
   const prevMonth = monthKey(prevMonthDate);
   const firstMonth = monthKey(addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -(financeRange - 1)));
+  const previousYearMonth = monthKey(new Date(today.getFullYear() - 1, today.getMonth(), 1));
+  const reportStartMonth = previousYearMonth < firstMonth ? previousYearMonth : firstMonth;
   const percentFormatter = new Intl.NumberFormat("es-CL", { maximumFractionDigits: 1, minimumFractionDigits: 1 });
   const pct = (value) => `${percentFormatter.format(Number(value) || 0)}%`;
   const deltaBadge = (current, previous) => {
@@ -870,9 +931,10 @@ function renderFinances() {
     return `${sign}${pct(diff)} vs. mes anterior (${money(previous)})`;
   };
 
-  const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total) AS sales,
+  const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total - s.tax) AS sales,
+      SUM(s.total) AS gross_sales,
       SUM(COALESCE(i.cost,0)) AS cost, SUM(COALESCE(i.units,0)) AS units, COUNT(*) AS transactions,
-      SUM(CASE WHEN substr(s.date,1,10) BETWEEN ? AND ? THEN s.total ELSE 0 END) AS recent_sales
+      SUM(CASE WHEN substr(s.date,1,10) BETWEEN ? AND ? THEN s.total - s.tax ELSE 0 END) AS recent_sales
     FROM sales s LEFT JOIN (
       SELECT si.sale_id, SUM(si.quantity*si.unit_cost) AS cost, SUM(si.quantity) AS units
       FROM sale_items si JOIN sales filtered ON filtered.id=si.sale_id
@@ -880,7 +942,7 @@ function renderFinances() {
       GROUP BY si.sale_id
     ) i ON i.sale_id=s.id
     WHERE s.status='completed' AND substr(s.date,1,7)>=? AND substr(s.date,1,7)<=?
-    GROUP BY substr(s.date,1,7)`, [firstDayKey, todayKey, firstMonth, currentMonth, firstMonth, currentMonth]);
+    GROUP BY substr(s.date,1,7)`, [firstDayKey, todayKey, reportStartMonth, currentMonth, reportStartMonth, currentMonth]);
   const monthlyMovements = query(`SELECT substr(date,1,7) AS month,
       SUM(CASE WHEN type='loss' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS losses,
       SUM(CASE WHEN type='entry' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS purchases,
@@ -899,6 +961,9 @@ function renderFinances() {
   const movementsForMonth = (month) => movementsByMonth.get(month) || {};
   const monthSales = Number(salesForMonth(currentMonth).sales) || 0;
   const prevMonthSales = Number(salesForMonth(prevMonth).sales) || 0;
+  const previousYearSales = Number(salesForMonth(previousYearMonth).sales) || 0;
+  const monthGrossSales = Number(salesForMonth(currentMonth).gross_sales) || 0;
+  const prevMonthGrossSales = Number(salesForMonth(prevMonth).gross_sales) || 0;
   const monthTxCount = Number(salesForMonth(currentMonth).transactions) || 0;
   const prevMonthTxCount = Number(salesForMonth(prevMonth).transactions) || 0;
   const monthUnitsSold = Number(salesForMonth(currentMonth).units) || 0;
@@ -915,20 +980,20 @@ function renderFinances() {
   const grossProfit = monthSales - monthCost;
   const prevGrossProfit = prevMonthSales - prevMonthCost;
   const grossMarginPct = monthSales > 0 ? (grossProfit / monthSales) * 100 : 0;
-  const profit = grossProfit - monthExpenses - monthLosses;
-  const prevProfit = prevGrossProfit - prevMonthExpenses - prevMonthLosses;
-  const netMarginPct = monthSales > 0 ? (profit / monthSales) * 100 : 0;
-  const avgTicket = monthTxCount > 0 ? Math.round(monthSales / monthTxCount) : 0;
-  const prevAvgTicket = prevMonthTxCount > 0 ? Math.round(prevMonthSales / prevMonthTxCount) : 0;
+  const avgTicket = monthTxCount > 0 ? Math.round(monthGrossSales / monthTxCount) : 0;
+  const prevAvgTicket = prevMonthTxCount > 0 ? Math.round(prevMonthGrossSales / prevMonthTxCount) : 0;
   const itemsPerSale = monthTxCount > 0 ? monthUnitsSold / monthTxCount : 0;
 
   const inventoryStats = query(`SELECT
       COALESCE(SUM(CASE WHEN stock > 0 THEN stock * cost ELSE 0 END), 0) AS cost_value,
-      COALESCE(SUM(CASE WHEN stock > 0 THEN stock * price ELSE 0 END), 0) AS retail_value
+      COALESCE(SUM(CASE WHEN stock > 0 THEN stock * price ELSE 0 END), 0) AS retail_value,
+      COALESCE(SUM(CASE WHEN stock > 0
+        THEN CASE WHEN tax_exempt=1 THEN stock*price ELSE ROUND(stock*price/1.19) END
+        ELSE 0 END), 0) AS net_retail_value
     FROM products WHERE active=1`)[0] || { cost_value: 0, retail_value: 0 };
   const inventoryCostValue = Number(inventoryStats.cost_value) || 0;
   const inventoryRetailValue = Number(inventoryStats.retail_value) || 0;
-  const inventoryPotentialProfit = Math.max(0, inventoryRetailValue - inventoryCostValue);
+  const inventoryPotentialProfit = (Number(inventoryStats.net_retail_value) || 0) - inventoryCostValue;
 
   const paymentBreakdown = query(`SELECT p.type, COUNT(DISTINCT p.sale_id) AS sales_count, COALESCE(SUM(p.amount),0) AS amount
     FROM payments p JOIN sales s ON s.id=p.sale_id
@@ -938,9 +1003,9 @@ function renderFinances() {
 
   const topProfitProducts = query(`SELECT si.product_name AS name,
       SUM(si.quantity) AS units,
-      SUM(si.line_total) AS revenue,
+      SUM(si.net_revenue) AS revenue,
       SUM(si.quantity * si.unit_cost) AS cost,
-      SUM(si.line_total - (si.quantity * si.unit_cost)) AS profit
+      SUM(si.net_revenue - (si.quantity * si.unit_cost)) AS profit
     FROM sale_items si JOIN sales s ON s.id=si.sale_id
     WHERE s.status='completed' AND substr(s.date,1,7)=?
     GROUP BY si.product_id, si.product_name
@@ -955,11 +1020,11 @@ function renderFinances() {
     const key = monthKey(date);
     const sales = salesForMonth(key);
     const movements = movementsForMonth(key);
-    const earnings = (Number(sales?.sales) || 0) - (Number(sales?.cost) || 0);
+    const grossEarnings = (Number(sales?.sales) || 0) - (Number(sales?.cost) || 0);
     const losses = (Number(movements.losses) || 0) + (expensesByMonth.get(key) || 0);
     return {
       label: new Intl.DateTimeFormat("es-CL", { month: "short", year: financeRange > 6 ? undefined : "2-digit" }).format(date).replace(".", ""),
-      earnings,
+      earnings: grossEarnings,
       losses,
       purchases: Number(movements.purchases) || 0
     };
@@ -985,7 +1050,7 @@ function renderFinances() {
   const chartBars = monthlyData.map((month, monthIndex) => {
     const center = chartLeft + groupWidth * (monthIndex + 0.5);
     const series = [
-      { key: "earnings", label: "Ganancias", value: month.earnings },
+      { key: "earnings", label: "Ganancia bruta", value: month.earnings },
       { key: "losses", label: "Pérdidas", value: month.losses },
       { key: "purchases", label: "Compras", value: month.purchases }
     ];
@@ -1028,17 +1093,27 @@ function renderFinances() {
   const expenses = query("SELECT id,date,category,description,amount FROM expenses ORDER BY id DESC LIMIT 50");
   const rows = expenses.length ? expenses.map((expense) => `<tr><td>${dateLabel(expense.date)}</td><td><strong>${escapeHtml(expense.category)}</strong></td><td>${escapeHtml(expense.description)}</td><td>${money(expense.amount)}</td></tr>`).join("") : `<tr><td colspan="4">${emptyState("Sin gastos registrados", "Agrega gastos para tener una vista clara de tus finanzas.")}</td></tr>`;
   const monthLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(today);
-  const profitStatus = profit < 2_000_000
+  const previousYearLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" })
+    .format(new Date(today.getFullYear() - 1, today.getMonth(), 1));
+  const yearOverYearChange = previousYearSales > 0
+    ? ((monthSales - previousYearSales) / previousYearSales) * 100
+    : null;
+  const yearOverYearComparison = yearOverYearChange === null
+    ? monthSales > 0
+      ? `Sin ingresos registrados en ${previousYearLabel} (${money(previousYearSales)})`
+      : `Sin ingresos en ambos períodos`
+    : `${yearOverYearChange > 0 ? "▲ +" : yearOverYearChange < 0 ? "▼ " : "• "}${pct(yearOverYearChange)} vs. ${previousYearLabel} (${money(previousYearSales)})`;
+  const revenueStatus = monthSales < 2_000_000
     ? { className: "low", label: "Menos de $2.000.000" }
-    : profit <= 6_000_000
+    : monthSales <= 6_000_000
       ? { className: "medium", label: "Entre $2.000.000 y $6.000.000" }
       : { className: "high", label: "Más de $6.000.000" };
-  const profitScaleMax = Math.max(8_000_000, Math.ceil(Math.max(0, profit) / 2_000_000) * 2_000_000);
-  const profitMarker = Math.max(0, Math.min(100, (profit / profitScaleMax) * 100));
-  const lowZoneWidth = (2_000_000 / profitScaleMax) * 100;
-  const mediumZoneWidth = (4_000_000 / profitScaleMax) * 100;
+  const revenueScaleMax = Math.max(8_000_000, Math.ceil(Math.max(0, monthSales) / 2_000_000) * 2_000_000);
+  const revenueMarker = Math.max(0, Math.min(100, (monthSales / revenueScaleMax) * 100));
+  const lowZoneWidth = (2_000_000 / revenueScaleMax) * 100;
+  const mediumZoneWidth = (4_000_000 / revenueScaleMax) * 100;
   const highZoneWidth = 100 - lowZoneWidth - mediumZoneWidth;
-  const dailySales = query(`SELECT substr(date,1,10) AS day, SUM(total) AS sales
+  const dailySales = query(`SELECT substr(date,1,10) AS day, SUM(total-tax) AS sales
     FROM sales
     WHERE status='completed' AND substr(date,1,7)=?
     GROUP BY substr(date,1,10)`, [currentMonth]);
@@ -1075,14 +1150,14 @@ function renderFinances() {
     return `${bar}${tick}`;
   }).join("");
   const monthlySalesChart = `<svg viewBox="0 0 ${salesChartWidth} ${salesChartHeight}" role="img" aria-label="Ventas completadas por día durante ${escapeHtml(monthLabel)}">${salesGrid}${salesBars}</svg>`;
-  const monthlyResultChart = `<section class="panel finance-month-panel finance-profit-${profitStatus.className} section-spacer">
+  const monthlyResultChart = `<section class="panel finance-month-panel finance-profit-${revenueStatus.className} section-spacer">
     <div class="finance-month-heading">
-      <div class="finance-month-title"><span class="heading-eyebrow">RESULTADOS DEL MES</span><h2>Ventas y ganancias de ${escapeHtml(monthLabel)}</h2><p>Ventas completadas por día y utilidad neta acumulada del mes.</p></div>
-      <div class="finance-month-result finance-result-${profitStatus.className}"><span>Ganancia neta</span><strong>${money(profit)}</strong><small>${profitStatus.label}</small></div>
+      <div class="finance-month-title"><span class="heading-eyebrow">INGRESOS DEL MES</span><h2>Ingresos de ${escapeHtml(monthLabel)}</h2><p>Ingresos netos sin IVA y con descuentos aplicados.</p></div>
+      <div class="finance-month-result finance-result-${revenueStatus.className}"><span>Ingresos del mes</span><strong>${money(monthSales)}</strong><small>${revenueStatus.label}</small><small>${yearOverYearComparison}</small></div>
     </div>
-    <div class="finance-month-metrics"><span><small>Ventas completadas</small><strong>${monthTxCount}</strong></span><span><small>Ingresos por ventas</small><strong>${money(monthSales)}</strong></span></div>
-    <div class="finance-profit-scale" role="img" aria-label="Ganancia neta ${escapeHtml(money(profit))}. ${profitStatus.label}.">
-      <div class="finance-profit-track"><i class="finance-profit-zone-low" style="width:${lowZoneWidth}%"></i><i class="finance-profit-zone-medium" style="width:${mediumZoneWidth}%"></i><i class="finance-profit-zone-high" style="width:${highZoneWidth}%"></i><b style="left:${profitMarker}%"></b></div>
+    <div class="finance-month-metrics"><span><small>Ventas completadas</small><strong>${monthTxCount}</strong></span><span><small>Ganancia bruta</small><strong>${money(grossProfit)}</strong></span></div>
+    <div class="finance-profit-scale" role="img" aria-label="Ingresos del mes ${escapeHtml(money(monthSales))}. ${revenueStatus.label}.">
+      <div class="finance-profit-track"><i class="finance-profit-zone-low" style="width:${lowZoneWidth}%"></i><i class="finance-profit-zone-medium" style="width:${mediumZoneWidth}%"></i><i class="finance-profit-zone-high" style="width:${highZoneWidth}%"></i><b style="left:${revenueMarker}%"></b></div>
       <div class="finance-profit-labels"><span>0</span><span style="left:${lowZoneWidth}%">$2M</span><span style="left:${lowZoneWidth + mediumZoneWidth}%">$6M</span><span>Más</span></div>
     </div>
     <div class="finance-month-chart-heading"><b>Ventas diarias</b><span>Pesos chilenos · día del mes</span></div>
@@ -1092,9 +1167,9 @@ function renderFinances() {
   return `${pageHeading("INDICADORES CLAVE (KPI)", "Finanzas", ` Estado de resultados, rentabilidad y métricas clave de ${monthLabel}.`, `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
     ${monthlyResultChart}
     <section class="stats-grid">
-      ${statCard("Ingresos del mes", money(monthSales), deltaBadge(monthSales, prevMonthSales), "↗")}
+      ${statCard("Ingresos del mes", money(monthSales), `${yearOverYearComparison} · sin IVA`, "↗")}
       ${statCard("Utilidad bruta", money(grossProfit), `Margen bruto: ${pct(grossMarginPct)} · Costo: ${money(monthCost)}`, "◈")}
-      ${statCard("Utilidad neta (Balance)", money(profit), `Margen neto: ${pct(netMarginPct)} · ${deltaBadge(profit, prevProfit)}`, "◷")}
+      ${statCard("Margen bruto", pct(grossMarginPct), `Ganancia bruta sobre ingresos netos · ${pct(prevMonthSales > 0 ? (prevGrossProfit / prevMonthSales) * 100 : 0)} el mes anterior`, "◷")}
       ${statCard("Ticket promedio", money(avgTicket), `${monthTxCount} ventas este mes · ${quantityFormatter.format(itemsPerSale)} prod/venta`, "▤")}
     </section>
     <section class="stats-grid section-spacer">
@@ -1105,14 +1180,11 @@ function renderFinances() {
     </section>
     <section class="finance-kpi-grid section-spacer">
       <article class="panel kpi-panel">
-        <div class="panel-heading"><div><h2>Estado de resultados del mes</h2><p>Desglose de ingresos, costos y utilidad en ${escapeHtml(monthLabel)}</p></div></div>
+        <div class="panel-heading"><div><h2>Ganancia bruta del mes</h2><p>Ingresos netos sin IVA y con descuentos, menos el costo de productos vendidos · ${escapeHtml(monthLabel)}</p></div></div>
         <div class="pnl-list">
           <div class="pnl-row"><span>(+) Ingresos por ventas (${monthTxCount})</span><strong>${money(monthSales)}</strong></div>
           <div class="pnl-row pnl-negative"><span>(−) Costo de productos vendidos</span><strong>− ${money(monthCost)}</strong></div>
-          <div class="pnl-row pnl-subtotal"><span>(=) Utilidad bruta (${pct(grossMarginPct)})</span><strong>${money(grossProfit)}</strong></div>
-          <div class="pnl-row pnl-negative"><span>(−) Gastos operativos</span><strong>− ${money(monthExpenses)}</strong></div>
-          <div class="pnl-row pnl-negative"><span>(−) Pérdidas por mermas</span><strong>− ${money(monthLosses)}</strong></div>
-          <div class="pnl-row pnl-total ${profit < 0 ? "is-loss" : "is-profit"}"><span>(=) Utilidad neta (${pct(netMarginPct)})</span><strong>${money(profit)}</strong></div>
+          <div class="pnl-row pnl-total ${grossProfit < 0 ? "is-loss" : "is-profit"}"><span>(=) Ganancia bruta (${pct(grossMarginPct)})</span><strong>${money(grossProfit)}</strong></div>
         </div>
       </article>
       <article class="panel kpi-panel">
@@ -1130,7 +1202,7 @@ function renderFinances() {
         <div class="kpi-bars">${expenseCategoriesMarkup}</div>
       </article>
     </section>
-    <section class="panel finance-history section-spacer"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias, pérdidas y compras</h2><p>Ganancias después del costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancias</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
+    <section class="panel finance-history section-spacer"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias brutas, pérdidas y compras</h2><p>Ganancia bruta: ingresos netos menos costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancia bruta</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
     <h2 class="subheading">Gastos recientes</h2><article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>FECHA</th><th>CATEGORÍA</th><th>DESCRIPCIÓN</th><th>MONTO</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
@@ -1302,18 +1374,19 @@ function saveMovement(form) {
 function saveSale() {
   if (!saleCart.length) throw new Error("Agrega al menos un producto a la venta.");
   const lineTotals = saleCart.map((item) => Math.round(item.price * item.quantity));
+  const lineNetValues = saleCart.map((item, index) => item.taxExempt
+    ? lineTotals[index]
+    : Math.round(lineTotals[index] / 1.19));
   const subtotal = lineTotals.reduce((sum, lineTotal) => sum + lineTotal, 0);
   const discount = Number(saleDiscount) || 0;
   if (!Number.isInteger(discount) || discount < 0 || discount > subtotal) throw new Error("El descuento debe ser un monto entero entre $0 y el subtotal.");
   const total = subtotal - discount;
-  const netBeforeDiscount = saleCart.reduce((sum, item, index) => {
-    const gross = lineTotals[index];
-    return sum + (item.taxExempt ? gross : Math.round(gross / 1.19));
-  }, 0);
+  const netBeforeDiscount = lineNetValues.reduce((sum, netValue) => sum + netValue, 0);
   const netAfterDiscount = subtotal
     ? Math.max(0, netBeforeDiscount - Math.round(discount * netBeforeDiscount / subtotal))
     : 0;
   const taxAfterDiscount = total - netAfterDiscount;
+  const lineNetRevenue = DatabaseLayer.allocateAmount(netAfterDiscount, lineNetValues);
   const isSplitPayment = paymentRows.length > 1;
   const isSingleNonCash = !isSplitPayment && paymentRows[0]?.type !== "Efectivo";
   const payments = paymentRows.map((payment) => ({
@@ -1370,9 +1443,9 @@ function saveSale() {
     }
     for (let index = 0; index < saleCart.length; index += 1) {
       const item = saleCart[index];
-      run(`INSERT INTO sale_items(sale_id,product_id,product_name,quantity,unit_price,line_total,unit_cost)
-        VALUES(?,?,?,?,?,?,?)`,
-      [saleId, item.id, item.name, item.quantity, item.price, lineTotals[index], item.cost]);
+      run(`INSERT INTO sale_items(sale_id,product_id,product_name,quantity,unit_price,line_total,unit_cost,net_revenue)
+        VALUES(?,?,?,?,?,?,?,?)`,
+      [saleId, item.id, item.name, item.quantity, item.price, lineTotals[index], item.cost, lineNetRevenue[index]]);
       run("INSERT INTO stock_movements(product_id,type,quantity,note,date) VALUES(?,'sale',?,?,?)", [item.id, -item.quantity, wasEditing ? `Venta #${saleId} (editada)` : `Venta #${saleId}`, localDateTime()]);
     }
     for (const payment of recordedPayments) {
@@ -1581,6 +1654,12 @@ function bindEvents() {
   $("#create-database").addEventListener("click", createDatabase);
   $("#open-database").addEventListener("click", openFilePicker);
   $("#change-database").addEventListener("click", openFilePicker);
+  for (const button of document.querySelectorAll(".sql-console-link, .sql-console-mobile-link")) {
+    button.addEventListener("click", () => {
+      currentView = "sql-console";
+      render();
+    });
+  }
   $("#save-database").addEventListener("click", saveDatabase);
   $("#exit-application").addEventListener("click", (event) => {
     exitToWelcome(event.currentTarget).catch((error) => {
@@ -1674,11 +1753,18 @@ function bindEvents() {
           render();
         }
       } else if (action === "complete-sale") saveSale();
+      else if (action === "run-sql") executeSqlConsole();
+      else if (action === "clear-sql") {
+        sqlConsoleInput = "";
+        sqlConsoleOutput = null;
+        render();
+      }
     } catch (error) {
       showError(error, "No se pudo completar la acción.");
     }
   });
   $("#page-content").addEventListener("input", (event) => {
+    if (event.target.id === "sql-console-input") sqlConsoleInput = event.target.value;
     if (event.target.id === "table-search") {
       searchValue = event.target.value;
       const selection = event.target.selectionStart;
@@ -1758,6 +1844,11 @@ function bindEvents() {
     }
   });
   $("#page-content").addEventListener("keydown", (event) => {
+    if (event.target.id === "sql-console-input" && (event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      executeSqlConsole();
+      return;
+    }
     if (event.key !== "Enter") return;
     if (event.target.id === "table-search" && currentView === "sales") {
       const code = event.target.value.trim();
