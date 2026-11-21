@@ -1197,7 +1197,7 @@ function openMovementForm(productId = "", supplierId = "", defaultType = "entry"
   const productOptions = products.map((product) => `<option value="${product.id}" ${String(product.id) === String(productId) ? "selected" : ""}>${escapeHtml(product.name)} · ${product.stock} u.</option>`).join("");
   const supplierOptions = suppliers.map((supplier) => `<option value="${supplier.id}" ${String(supplier.id) === String(supplierId) ? "selected" : ""}>${escapeHtml(supplier.name)}</option>`).join("");
   const types = MOVEMENT_TYPES.map((type) => `<option value="${type.value}" ${type.value === defaultType ? "selected" : ""}>${type.label}</option>`).join("");
-  modal("Movimiento de inventario", "Los movimientos quedan como auditoría de stock; las entradas con proveedor también registran una compra.", `<form id="movement-form" class="modal-form"><div class="field"><label for="movement-product">Producto</label><select id="movement-product" name="product_id">${productOptions}</select></div><div class="form-row"><div class="field"><label for="movement-type">Tipo</label><select id="movement-type" name="type">${types}</select></div>${field("movement-quantity", "Cantidad / stock final", "", "number", true, 'min="0" step="0.001"')}</div><div class="field"><label for="movement-supplier">Proveedor (opcional)</label><select id="movement-supplier" name="supplier_id"><option value="">Sin proveedor</option>${supplierOptions}</select></div><div class="form-row"><div class="field"><label for="movement-document">Documento de compra</label><select id="movement-document" name="purchase_document"><option>SIN_DOC</option><option>FACTURA</option><option>BOLETA</option><option>GUIA_DESPACHO</option></select></div>${field("movement-folio", "Folio de compra")}</div>${field("movement-cost", "Costo unitario neto (CLP)", "", "number", false, 'min="0" step="1"')}<div class="field"><label for="movement-note">Nota o motivo</label><input id="movement-note" name="note" placeholder="Ej.: compra, corrección, producto dañado"></div><div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">Registrar movimiento</button></div></form>`, false);
+  modal("Movimiento de inventario", "Los movimientos quedan como auditoría de stock; las entradas con proveedor también registran una compra. En las entradas, deja vacío el precio de venta para conservar el actual.", `<form id="movement-form" class="modal-form"><div class="field"><label for="movement-product">Producto</label><select id="movement-product" name="product_id">${productOptions}</select></div><div class="form-row"><div class="field"><label for="movement-type">Tipo</label><select id="movement-type" name="type">${types}</select></div>${field("movement-quantity", "Cantidad / stock final", "", "number", true, 'min="0" step="0.001"')}</div><div class="field"><label for="movement-supplier">Proveedor (opcional)</label><select id="movement-supplier" name="supplier_id"><option value="">Sin proveedor</option>${supplierOptions}</select></div><div class="form-row"><div class="field"><label for="movement-document">Documento de compra</label><select id="movement-document" name="purchase_document"><option>SIN_DOC</option><option>FACTURA</option><option>BOLETA</option><option>GUIA_DESPACHO</option></select></div>${field("movement-folio", "Folio de compra")}</div><div class="form-row">${field("movement-cost", "Costo de compra por unidad", "", "number", false, 'min="0" step="1"')}<div class="field" id="movement-sale-price-field"><label for="movement-sale-price">Nuevo precio final de venta</label><input id="movement-sale-price" name="sale_price" type="number" min="0" step="1" placeholder="Opcional; vacío para mantener el precio actual"></div></div><div class="field"><label for="movement-note">Nota o motivo</label><input id="movement-note" name="note" placeholder="Ej.: compra, corrección, producto dañado"></div><div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">Registrar movimiento</button></div></form>`, false);
   $("#movement-type").addEventListener("change", () => {
     const type = $("#movement-type").value;
     $('label[for="movement-quantity"]').textContent = type === "adjustment" ? "Nuevo stock final" : "Cantidad";
@@ -1205,6 +1205,10 @@ function openMovementForm(productId = "", supplierId = "", defaultType = "entry"
     $("#movement-document").disabled = type !== "entry";
     $("#movement-folio").disabled = type !== "entry";
     $("#movement-cost").disabled = type !== "entry";
+    $("#movement-sale-price-field").style.display = type === "entry" ? "grid" : "none";
+    if (type !== "entry") {
+      $("#movement-sale-price").value = "";
+    }
   });
   $("#movement-type").dispatchEvent(new Event("change"));
 }
@@ -1309,10 +1313,32 @@ function saveMovement(form) {
   const data = new FormData(form);
   const productId = Number(data.get("product_id"));
   const type = String(data.get("type"));
-  recordMovement(productId, type, Number(data.get("movement-quantity")), String(data.get("note")).trim(), data.get("supplier_id"));
+  const rawSalePrice = String(data.get("sale_price") ?? "").trim();
+  const updateSalePrice = rawSalePrice !== "";
+  let salePrice;
+  let netPrice;
+  if (updateSalePrice) {
+    salePrice = Number(rawSalePrice);
+    if (type !== "entry") throw new Error("Solo puedes actualizar el precio de venta al registrar una entrada.");
+    if (!rawSalePrice || !Number.isInteger(salePrice) || salePrice < 0) {
+      throw new Error("El nuevo precio final debe ser un número entero igual o mayor a cero.");
+    }
+    const product = query("SELECT tax_exempt FROM products WHERE id=?", [productId])[0];
+    if (!product) throw new Error("El producto seleccionado ya no existe.");
+    netPrice = product.tax_exempt ? salePrice : Math.round(salePrice / 1.19);
+  }
+  try {
+    db.run("BEGIN TRANSACTION");
+    recordMovement(productId, type, Number(data.get("movement-quantity")), String(data.get("note")).trim(), data.get("supplier_id"));
+    if (updateSalePrice) run("UPDATE products SET price=?,net_price=? WHERE id=?", [salePrice, netPrice, productId]);
+    db.run("COMMIT");
+  } catch (error) {
+    try { db.run("ROLLBACK"); } catch (rollbackError) { console.error(rollbackError); }
+    throw error;
+  }
   closeModal();
   render();
-  notify("Movimiento de inventario registrado.");
+  notify(updateSalePrice ? "Movimiento registrado y precio de venta actualizado." : "Movimiento de inventario registrado.");
 }
 
 function saveSale() {
