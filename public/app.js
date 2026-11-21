@@ -4,7 +4,6 @@ const TITLES = {
   sales: "Ventas",
   "sales-history": "Historial de ventas",
   products: "Productos",
-  finances: "Finanzas",
   "sql-console": "Consola SQL"
 };
 const PAYMENT_TYPES = ["Efectivo", "Débito", "Crédito", "Transferencia", "Otro"];
@@ -321,7 +320,6 @@ function render() {
     sales: renderSales,
     "sales-history": renderSalesHistory,
     products: renderProducts,
-    finances: renderFinances,
     "sql-console": renderSqlConsole
   };
   $("#page-content").innerHTML = pages[currentView]();
@@ -573,8 +571,7 @@ function dashboardStockGroups() {
   return groups;
 }
 
-function stockGroupMarkup(limit = 3) {
-  const groups = dashboardStockGroups();
+function stockGroupMarkup(limit = 3, groups = dashboardStockGroups()) {
   return groups.map((group) => `<section class="stock-group stock-group-${group.className}">
     <div class="stock-group-heading"><span class="stock-state-dot"></span><b>${group.label}</b><span class="stock-group-count">${group.items.length}</span></div>
     ${group.items.length ? group.items.slice(0, limit).map((product) => `<div class="stock-row"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span class="stock-product"><b>${escapeHtml(product.name)}</b><small>${escapeHtml(product.category || "Sin categoría")} · mín. ${quantityLabel(product.min_stock, product.unit)}</small></span><span class="stock-count">${quantityLabel(product.stock, product.unit)}</span><button class="button button-muted button-small stock-restock" data-action="restock-product" data-id="${product.id}">Reponer</button></div>`).join("") : `<p class="stock-group-empty">Sin productos en este nivel</p>`}
@@ -628,34 +625,15 @@ function inventorySalesAnalysis() {
   };
 }
 
-function renderDashboard() {
-  const today = localDateTime().slice(0, 10);
-  const month = today.slice(0, 7);
-  const salesToday = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND date LIKE ?", [`${today}%`])) || 0;
-  const salesMonth = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND date LIKE ?", [`${month}%`])) || 0;
-  const productCount = Number(scalar("SELECT COUNT(*) AS value FROM products WHERE active=1")) || 0;
-  const stockGroups = dashboardStockGroups();
-  const lowStock = stockGroups.reduce((sum, group) => sum + group.items.length, 0);
-  const recentSales = query(`SELECT s.id,s.date,s.total,c.name AS customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC LIMIT 5`);
-  const chartRangeLabels = { week: "7 días", month: "Mensual", six: "6 meses", thirteen: "13 meses" };
-  const chartTitle = { week: "Ventas de la semana", month: "Ventas del mes", six: "Ventas de 6 meses", thirteen: "Ventas de 13 meses" }[dashboardRange];
-  return `${pageHeading("VISTA GENERAL", "Hola, aquí está tu negocio.", "Un resumen claro para que sepas cómo va todo hoy.")}
-    <section class="stats-grid">
-      ${statCard("Ventas de hoy", money(salesToday), "Total registrado durante el día", "↗")}
-      ${statCard("Ventas del mes", money(salesMonth), "Acumulado del mes en curso", "▤")}
-      ${statCard("Productos", String(productCount), "Productos en tu catálogo", "◇")}
-      ${statCard("Por reponer", String(lowStock), lowStock ? "Críticos, bajos o por sugerencia" : "Todo tu inventario está al día", "▦")}
-    </section>
-    <section class="dashboard-grid">
-      <article class="panel"><div class="panel-heading chart-panel-heading"><div><h2>${chartTitle}</h2><p>Ingresos completados · en pesos chilenos</p></div><div class="chart-range-switch" role="group" aria-label="Período del gráfico">${Object.entries(chartRangeLabels).map(([range, label]) => `<button class="chart-range-button ${dashboardRange === range ? "active" : ""}" data-chart-range="${range}" aria-pressed="${dashboardRange === range}">${label}</button>`).join("")}</div></div><div class="chart-legend"><span><i class="legend-dot positive"></i>Subida</span><span><i class="legend-dot negative"></i>Bajada</span></div><div class="chart-wrap">${dashboardChart()}</div></article>
-      <article class="panel list-panel"><div class="panel-heading"><div><h2>Reposición de stock</h2><p>Según el stock mínimo configurado</p></div><button class="panel-link" data-view="inventory">Ver inventario →</button></div><div class="stock-list">${stockGroupMarkup(3)}</div><p class="stock-note">Crítico: sin stock · Bajo: bajo el mínimo · Sugerencia: hasta 50% sobre el mínimo.</p></article>
-    </section>
-    <article class="panel section-spacer"><div class="panel-heading"><div><h2>Últimas ventas</h2><p>Actividad reciente de tu negocio</p></div><button class="panel-link" data-view="sales">Ir a ventas →</button></div>
-      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th><th></th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>`;
-}
-
 function searchToolbar(placeholder, button = "") {
   return `<div class="table-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="table-search" type="search" value="${escapeHtml(searchValue)}" placeholder="${placeholder}"></label>${button}</div>`;
+}
+
+function normalizeSearchText(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("es");
 }
 
 function productRows(products) {
@@ -728,8 +706,8 @@ function renderSales() {
   for (const product of products) {
     product.availableStock = Number(product.stock) + (originalQtyByProduct.get(Number(product.id)) || 0);
   }
-  const term = searchValue.toLocaleLowerCase("es");
-  const filtered = products.filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
+  const term = normalizeSearchText(searchValue);
+  const filtered = products.filter((product) => normalizeSearchText(`${product.name} ${product.sku} ${product.barcode} ${product.category}`).includes(term));
   const customers = query("SELECT id,name FROM customers ORDER BY name");
   const subTotal = saleCart.reduce((total, item) => total + Math.round(item.price * item.quantity), 0);
   const discount = Math.min(Number(saleDiscount) || 0, subTotal);
@@ -765,7 +743,7 @@ function renderSales() {
       ${index > 0 ? `<button class="payment-remove" type="button" data-action="remove-payment" data-index="${index}" aria-label="Eliminar medio de pago ${index + 1}" title="Eliminar medio de pago">×</button>` : ""}
     </div>`;
   }).join("");
-  const historyButton = `${editingSaleId ? `<button class="button button-muted button-small" data-action="cancel-edit-sale">Cancelar edición</button>` : ""}<button class="button button-muted button-small" data-view="sales-history">◷ Historial de ventas</button>`;
+  const historyButton = `<button class="button button-muted button-small" data-view="sales-history">◷ Historial de ventas</button>`;
   return `${pageHeading(editingSaleId ? "EDICIÓN DE VENTA" : "REGISTRO DE VENTAS", editingSaleId ? `Editar venta #${editingSaleId}` : "Ventas", editingSaleId ? "Modifica los productos, el descuento o los medios de pago y guarda los cambios." : "Crea ventas, aplica descuentos y combina medios de pago.", historyButton)}
     <div class="sale-layout">
       <article class="panel cart-panel"><div class="panel-heading"><div><h2>${editingSaleId ? `Venta #${editingSaleId}` : "Tu venta"}</h2><p>${saleCart.length} producto${saleCart.length === 1 ? "" : "s"} agregado${saleCart.length === 1 ? "" : "s"}</p></div></div><div class="cart-items">${cartContents}</div>
@@ -776,6 +754,7 @@ function renderSales() {
           <div class="payment-header"><b>MEDIOS DE PAGO</b><button class="table-action" data-action="add-payment">+ Dividir pago</button></div>${paymentMarkup}
           <div id="payment-balance" class="payment-balance ${paymentError ? "error" : changeDue > 0 ? "change-due" : ""}">Ingresado: ${money(paymentTotal)} · ${paymentStatus}</div>
           <button class="button button-primary full-width" data-action="complete-sale" ${saleCart.length === 0 ? "disabled" : ""}>${editingSaleId ? "Guardar cambios de la venta" : "Completar venta"}</button>
+          ${editingSaleId ? `<button class="button button-muted full-width cancel-edit-sale" data-action="cancel-edit-sale">Cancelar edición</button>` : ""}
         </div>
       </article>
       <article class="panel table-panel product-search-panel"><div class="panel-heading"><div><h2>Agregar productos</h2><p>Pistolea con el lector de código de barras o busca manualmente</p></div></div>${searchToolbar("Pistolea el código de barras o busca por nombre / código…")}<div class="search-results">${productResults}</div></article>
@@ -910,9 +889,15 @@ function renderSuppliers() {
     <article class="panel table-panel">${searchToolbar("Buscar proveedor por nombre o contacto")}<div class="table-scroll"><table class="data-table"><thead><tr><th>PROVEEDOR</th><th>TELÉFONO</th><th>CORREO</th><th>ENTRADAS ASOCIADAS</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
-function renderFinances() {
+function renderDashboard() {
   const today = new Date();
   const todayKey = dateKey(today);
+  const salesToday = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND date LIKE ?", [`${todayKey}%`])) || 0;
+  const productCount = Number(scalar("SELECT COUNT(*) AS value FROM products WHERE active=1")) || 0;
+  const stockGroups = dashboardStockGroups();
+  const recentSales = query(`SELECT s.id,s.date,s.total,c.name AS customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC LIMIT 5`);
+  const chartRangeLabels = { week: "7 días", month: "Mensual", six: "6 meses", thirteen: "13 meses" };
+  const chartTitle = { week: "Ventas de los últimos 7 días", month: "Ventas de este mes", six: "Ventas de 6 meses", thirteen: "Ventas de 13 meses" }[dashboardRange];
   const firstDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
   const firstDayKey = dateKey(firstDay);
   const currentMonth = monthKey(today);
@@ -963,9 +948,7 @@ function renderFinances() {
   const prevMonthSales = Number(salesForMonth(prevMonth).sales) || 0;
   const previousYearSales = Number(salesForMonth(previousYearMonth).sales) || 0;
   const monthGrossSales = Number(salesForMonth(currentMonth).gross_sales) || 0;
-  const prevMonthGrossSales = Number(salesForMonth(prevMonth).gross_sales) || 0;
   const monthTxCount = Number(salesForMonth(currentMonth).transactions) || 0;
-  const prevMonthTxCount = Number(salesForMonth(prevMonth).transactions) || 0;
   const monthUnitsSold = Number(salesForMonth(currentMonth).units) || 0;
   const monthCost = Number(salesForMonth(currentMonth).cost) || 0;
   const prevMonthCost = Number(salesForMonth(prevMonth).cost) || 0;
@@ -974,14 +957,13 @@ function renderFinances() {
   const monthLosses = Number(movementsForMonth(currentMonth).losses) || 0;
   const prevMonthLosses = Number(movementsForMonth(prevMonth).losses) || 0;
   const monthPurchases = Number(movementsForMonth(currentMonth).purchases) || 0;
-  const recentSales = monthlySales.reduce((sum, row) => sum + (Number(row.recent_sales) || 0), 0);
+  const salesLast30Days = monthlySales.reduce((sum, row) => sum + (Number(row.recent_sales) || 0), 0);
   const recentLosses = monthlyMovements.reduce((sum, row) => sum + (Number(row.recent_losses) || 0), 0);
 
   const grossProfit = monthSales - monthCost;
   const prevGrossProfit = prevMonthSales - prevMonthCost;
   const grossMarginPct = monthSales > 0 ? (grossProfit / monthSales) * 100 : 0;
   const avgTicket = monthTxCount > 0 ? Math.round(monthGrossSales / monthTxCount) : 0;
-  const prevAvgTicket = prevMonthTxCount > 0 ? Math.round(prevMonthGrossSales / prevMonthTxCount) : 0;
   const itemsPerSale = monthTxCount > 0 ? monthUnitsSold / monthTxCount : 0;
 
   const inventoryStats = query(`SELECT
@@ -1091,7 +1073,7 @@ function renderFinances() {
   }).join("") : emptyState("Sin gastos este mes", "Registra gastos para analizar en qué se va tu presupuesto.");
 
   const expenses = query("SELECT id,date,category,description,amount FROM expenses ORDER BY id DESC LIMIT 50");
-  const rows = expenses.length ? expenses.map((expense) => `<tr><td>${dateLabel(expense.date)}</td><td><strong>${escapeHtml(expense.category)}</strong></td><td>${escapeHtml(expense.description)}</td><td>${money(expense.amount)}</td></tr>`).join("") : `<tr><td colspan="4">${emptyState("Sin gastos registrados", "Agrega gastos para tener una vista clara de tus finanzas.")}</td></tr>`;
+  const rows = expenses.length ? expenses.map((expense) => `<tr><td>${dateLabel(expense.date)}</td><td><strong>${escapeHtml(expense.category)}</strong></td><td>${escapeHtml(expense.description)}</td><td>${money(expense.amount)}</td><td><div class="action-cell"><button class="table-action" data-action="edit-expense" data-id="${expense.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-expense" data-id="${expense.id}">Borrar</button></div></td></tr>`).join("") : `<tr><td colspan="5">${emptyState("Sin gastos registrados", "Agrega gastos para tener una vista clara de tus finanzas.")}</td></tr>`;
   const monthLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(today);
   const previousYearLabel = new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" })
     .format(new Date(today.getFullYear() - 1, today.getMonth(), 1));
@@ -1113,79 +1095,39 @@ function renderFinances() {
   const lowZoneWidth = (2_000_000 / revenueScaleMax) * 100;
   const mediumZoneWidth = (4_000_000 / revenueScaleMax) * 100;
   const highZoneWidth = 100 - lowZoneWidth - mediumZoneWidth;
-  const dailySales = query(`SELECT substr(date,1,10) AS day, SUM(total-tax) AS sales
-    FROM sales
-    WHERE status='completed' AND substr(date,1,7)=?
-    GROUP BY substr(date,1,10)`, [currentMonth]);
-  const dailySalesByDate = new Map(dailySales.map((row) => [row.day, Number(row.sales) || 0]));
-  const salesDays = Array.from({ length: today.getDate() }, (_, index) => {
-    const key = dateKey(new Date(today.getFullYear(), today.getMonth(), index + 1));
-    return { day: index + 1, sales: dailySalesByDate.get(key) || 0 };
-  });
-  const salesChartWidth = 780;
-  const salesChartHeight = 240;
-  const salesChartLeft = 54;
-  const salesChartRight = 766;
-  const salesChartTop = 24;
-  const salesChartBottom = 190;
-  const salesMax = Math.max(...salesDays.map((day) => day.sales), 1);
-  const salesGroupWidth = (salesChartRight - salesChartLeft) / salesDays.length;
-  const salesBarWidth = Math.min(18, salesGroupWidth * 0.65);
-  const salesY = (value) => salesChartBottom - (value / salesMax) * (salesChartBottom - salesChartTop);
-  const salesGrid = [0, 1, 2, 3, 4].map((index) => {
-    const value = salesMax * (4 - index) / 4;
-    const y = salesChartTop + index * (salesChartBottom - salesChartTop) / 4;
-    return `<line x1="${salesChartLeft}" y1="${y}" x2="${salesChartRight}" y2="${y}" class="chart-gridline"/><text x="${salesChartLeft - 8}" y="${y + 3}" text-anchor="end" class="chart-text">${escapeHtml(shortMoney(value))}</text>`;
-  }).join("");
-  const salesBars = salesDays.map((day, index) => {
-    const x = salesChartLeft + salesGroupWidth * index + (salesGroupWidth - salesBarWidth) / 2;
-    const y = salesY(day.sales);
-    const label = String(day.day).padStart(2, "0");
-    const bar = day.sales > 0
-      ? `<rect x="${x}" y="${y}" width="${salesBarWidth}" height="${salesChartBottom - y}" rx="3" class="finance-month-sales-bar"><title>${label} ${monthLabel} · Ventas: ${escapeHtml(money(day.sales))}</title></rect>`
-      : "";
-    const tick = index % 5 === 0 || index === salesDays.length - 1
-      ? `<text x="${x + salesBarWidth / 2}" y="216" text-anchor="middle" class="chart-text">${day.day}</text>`
-      : "";
-    return `${bar}${tick}`;
-  }).join("");
-  const monthlySalesChart = `<svg viewBox="0 0 ${salesChartWidth} ${salesChartHeight}" role="img" aria-label="Ventas completadas por día durante ${escapeHtml(monthLabel)}">${salesGrid}${salesBars}</svg>`;
-  const monthlyResultChart = `<section class="panel finance-month-panel finance-profit-${revenueStatus.className} section-spacer">
-    <div class="finance-month-heading">
-      <div class="finance-month-title"><span class="heading-eyebrow">INGRESOS DEL MES</span><h2>Ingresos de ${escapeHtml(monthLabel)}</h2><p>Ingresos netos sin IVA y con descuentos aplicados.</p></div>
-      <div class="finance-month-result finance-result-${revenueStatus.className}"><span>Ingresos del mes</span><strong>${money(monthSales)}</strong><small>${revenueStatus.label}</small><small>${yearOverYearComparison}</small></div>
+  const revenueGoalPanel = `<section class="panel revenue-goal-panel revenue-goal-${revenueStatus.className}">
+    <div class="revenue-goal-heading">
+      <div class="revenue-goal-title"><span class="heading-eyebrow">INGRESOS DEL MES</span><h2>Meta de ingresos · ${escapeHtml(monthLabel)}</h2><p>Rojo: menos de $2.000.000 · Amarillo: $2.000.000–$6.000.000 · Verde: más de $6.000.000.</p></div>
+      <div class="revenue-goal-result revenue-goal-result-${revenueStatus.className}"><span>Ingreso neto acumulado</span><strong>${money(monthSales)}</strong><small>${revenueStatus.label}</small></div>
     </div>
-    <div class="finance-month-metrics"><span><small>Ventas completadas</small><strong>${monthTxCount}</strong></span><span><small>Ganancia bruta</small><strong>${money(grossProfit)}</strong></span></div>
-    <div class="finance-profit-scale" role="img" aria-label="Ingresos del mes ${escapeHtml(money(monthSales))}. ${revenueStatus.label}.">
-      <div class="finance-profit-track"><i class="finance-profit-zone-low" style="width:${lowZoneWidth}%"></i><i class="finance-profit-zone-medium" style="width:${mediumZoneWidth}%"></i><i class="finance-profit-zone-high" style="width:${highZoneWidth}%"></i><b style="left:${revenueMarker}%"></b></div>
-      <div class="finance-profit-labels"><span>0</span><span style="left:${lowZoneWidth}%">$2M</span><span style="left:${lowZoneWidth + mediumZoneWidth}%">$6M</span><span>Más</span></div>
+    <div class="revenue-goal-scale" role="img" aria-label="Ingresos netos del mes: ${escapeHtml(money(monthSales))}. ${revenueStatus.label}. Tramos: menos de 2 millones, de 2 a 6 millones y más de 6 millones.">
+      <div class="revenue-goal-track"><i class="revenue-zone-low" style="width:${lowZoneWidth}%"></i><i class="revenue-zone-medium" style="width:${mediumZoneWidth}%"></i><i class="revenue-zone-high" style="width:${highZoneWidth}%"></i><b style="left:${revenueMarker}%"></b></div>
+      <div class="revenue-goal-labels"><span>0</span><span style="left:${lowZoneWidth}%">$2M</span><span style="left:${lowZoneWidth + mediumZoneWidth}%">$6M</span><span>Más</span></div>
     </div>
-    <div class="finance-month-chart-heading"><b>Ventas diarias</b><span>Pesos chilenos · día del mes</span></div>
-    <div class="chart-wrap finance-month-chart">${monthlySalesChart}</div>
+    <p class="revenue-goal-note">${yearOverYearComparison} · Sin IVA y con descuentos aplicados.</p>
   </section>`;
-
-  return `${pageHeading("INDICADORES CLAVE (KPI)", "Finanzas", ` Estado de resultados, rentabilidad y métricas clave de ${monthLabel}.`, `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
-    ${monthlyResultChart}
+  return `${pageHeading("VISTA GENERAL", "Resumen", `Indicadores de ventas, rentabilidad e inventario para ${monthLabel}.`, `<button class="button button-primary button-small" data-action="new-expense">+ Registrar gasto</button>`)}
+    ${revenueGoalPanel}
     <section class="stats-grid">
-      ${statCard("Ingresos del mes", money(monthSales), `${yearOverYearComparison} · sin IVA`, "↗")}
-      ${statCard("Utilidad bruta", money(grossProfit), `Margen bruto: ${pct(grossMarginPct)} · Costo: ${money(monthCost)}`, "◈")}
-      ${statCard("Margen bruto", pct(grossMarginPct), `Ganancia bruta sobre ingresos netos · ${pct(prevMonthSales > 0 ? (prevGrossProfit / prevMonthSales) * 100 : 0)} el mes anterior`, "◷")}
+      ${statCard("Utilidad bruta", money(grossProfit), `Costo de productos vendidos: ${money(monthCost)}`, "◈")}
+      ${statCard("Margen bruto", pct(grossMarginPct), `Mes anterior: ${pct(prevMonthSales > 0 ? (prevGrossProfit / prevMonthSales) * 100 : 0)}`, "◷")}
       ${statCard("Ticket promedio", money(avgTicket), `${monthTxCount} ventas este mes · ${quantityFormatter.format(itemsPerSale)} prod/venta`, "▤")}
+      ${statCard("Ventas de hoy", money(salesToday), "Total registrado hoy · con IVA", "↗")}
     </section>
     <section class="stats-grid section-spacer">
       ${statCard("Gastos operativos (mes)", money(monthExpenses), deltaBadge(monthExpenses, prevMonthExpenses), "↘")}
       ${statCard("Mermas (mes)", money(monthLosses), `${deltaBadge(monthLosses, prevMonthLosses)} · 30d: ${money(recentLosses)}`, "⚠")}
-      ${statCard("Capital en inventario", money(inventoryCostValue), `Valor venta: ${money(inventoryRetailValue)} · Ganancia pot.: ${money(inventoryPotentialProfit)}`, "▦")}
-      ${statCard("Compras de stock (mes)", money(monthPurchases), `Ventas últimos 30 días: ${money(recentSales)}`, "◇")}
+      ${statCard("Capital en inventario", money(inventoryCostValue), `${productCount} productos · Valor venta: ${money(inventoryRetailValue)} · Ganancia pot.: ${money(inventoryPotentialProfit)}`, "▦")}
+      ${statCard("Compras de stock (mes)", money(monthPurchases), `Ventas últimos 30 días: ${money(salesLast30Days)}`, "◇")}
+    </section>
+    <section class="dashboard-grid section-spacer">
+      <article class="panel"><div class="panel-heading chart-panel-heading"><div><h2>${chartTitle}</h2><p>Ventas completadas · pesos chilenos con IVA</p></div><div class="chart-range-switch" role="group" aria-label="Período del gráfico">${Object.entries(chartRangeLabels).map(([range, label]) => `<button class="chart-range-button ${dashboardRange === range ? "active" : ""}" data-chart-range="${range}" aria-pressed="${dashboardRange === range}">${label}</button>`).join("")}</div></div><div class="chart-legend"><span><i class="legend-dot positive"></i>Subida</span><span><i class="legend-dot negative"></i>Bajada</span></div><div class="chart-wrap">${dashboardChart()}</div></article>
+      <article class="panel list-panel"><div class="panel-heading"><div><h2>Reposición de stock</h2><p>Productos que requieren atención</p></div><button class="panel-link" data-view="inventory">Ver inventario →</button></div><div class="stock-list">${stockGroupMarkup(3, stockGroups)}</div><p class="stock-note">Crítico: sin stock · Bajo: bajo el mínimo · Sugerencia: hasta 50% sobre el mínimo.</p></article>
     </section>
     <section class="finance-kpi-grid section-spacer">
       <article class="panel kpi-panel">
-        <div class="panel-heading"><div><h2>Ganancia bruta del mes</h2><p>Ingresos netos sin IVA y con descuentos, menos el costo de productos vendidos · ${escapeHtml(monthLabel)}</p></div></div>
-        <div class="pnl-list">
-          <div class="pnl-row"><span>(+) Ingresos por ventas (${monthTxCount})</span><strong>${money(monthSales)}</strong></div>
-          <div class="pnl-row pnl-negative"><span>(−) Costo de productos vendidos</span><strong>− ${money(monthCost)}</strong></div>
-          <div class="pnl-row pnl-total ${grossProfit < 0 ? "is-loss" : "is-profit"}"><span>(=) Ganancia bruta (${pct(grossMarginPct)})</span><strong>${money(grossProfit)}</strong></div>
-        </div>
+        <div class="panel-heading"><div><h2>Productos más rentables del mes</h2><p>Mayor aporte a la utilidad bruta (venta menos costo)</p></div></div>
+        <div class="analysis-list">${topProductsMarkup}</div>
       </article>
       <article class="panel kpi-panel">
         <div class="panel-heading"><div><h2>Recaudación por medio de pago</h2><p>Distribución de ingresos cobrados este mes</p></div></div>
@@ -1194,23 +1136,23 @@ function renderFinances() {
     </section>
     <section class="finance-kpi-grid section-spacer">
       <article class="panel kpi-panel">
-        <div class="panel-heading"><div><h2>Productos más rentables del mes</h2><p>Mayor aporte a la utilidad bruta (venta menos costo)</p></div></div>
-        <div class="analysis-list">${topProductsMarkup}</div>
-      </article>
-      <article class="panel kpi-panel">
         <div class="panel-heading"><div><h2>Distribución de gastos del mes</h2><p>Categorías con mayor peso en tus gastos operativos</p></div></div>
         <div class="kpi-bars">${expenseCategoriesMarkup}</div>
       </article>
+      <section class="panel finance-history kpi-panel"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias brutas, pérdidas y compras</h2><p>Ganancia bruta: ingresos netos menos costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancia bruta</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
     </section>
-    <section class="panel finance-history section-spacer"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias brutas, pérdidas y compras</h2><p>Ganancia bruta: ingresos netos menos costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancia bruta</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
-    <h2 class="subheading">Gastos recientes</h2><article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>FECHA</th><th>CATEGORÍA</th><th>DESCRIPCIÓN</th><th>MONTO</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
+    <article class="panel section-spacer"><div class="panel-heading"><div><h2>Últimas ventas</h2><p>Actividad reciente</p></div><button class="panel-link" data-view="sales">Ir a ventas →</button></div>
+      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th><th></th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>
+    <h2 class="subheading">Gastos recientes</h2><article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>FECHA</th><th>CATEGORÍA</th><th>DESCRIPCIÓN</th><th>MONTO</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
-function modal(title, description, form) {
+function modal(title, description, form, closeOnBackdrop = true) {
   $("#modal-root").innerHTML = `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><div><h2 id="modal-title">${title}</h2><p>${description}</p></div><button class="modal-close" data-action="close-modal" aria-label="Cerrar">×</button></div>${form}</section></div>`;
-  $(".modal-backdrop").addEventListener("click", (event) => {
-    if (event.target.classList.contains("modal-backdrop")) closeModal();
-  });
+  if (closeOnBackdrop) {
+    $(".modal-backdrop").addEventListener("click", (event) => {
+      if (event.target.classList.contains("modal-backdrop")) closeModal();
+    });
+  }
   $("input, select, textarea", $(".modal"))?.focus();
 }
 
@@ -1234,7 +1176,7 @@ function openProductForm(product = null) {
     <div class="field"><label for="product-description">Descripción</label><textarea id="product-description" name="description">${escapeHtml(product?.description || "")}</textarea></div>
     <div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">${editing ? "Guardar cambios" : "Crear producto"}</button></div>
     <input type="hidden" name="product-id" value="${product?.id || ""}"></form>`;
-  modal(editing ? "Editar producto" : "Nuevo producto", "Mantén actualizados los datos y el stock de tu catálogo.", form);
+  modal(editing ? "Editar producto" : "Nuevo producto", "Mantén actualizados los datos y el stock de tu catálogo.", form, false);
 }
 
 function openCustomerForm() {
@@ -1255,7 +1197,7 @@ function openMovementForm(productId = "", supplierId = "", defaultType = "entry"
   const productOptions = products.map((product) => `<option value="${product.id}" ${String(product.id) === String(productId) ? "selected" : ""}>${escapeHtml(product.name)} · ${product.stock} u.</option>`).join("");
   const supplierOptions = suppliers.map((supplier) => `<option value="${supplier.id}" ${String(supplier.id) === String(supplierId) ? "selected" : ""}>${escapeHtml(supplier.name)}</option>`).join("");
   const types = MOVEMENT_TYPES.map((type) => `<option value="${type.value}" ${type.value === defaultType ? "selected" : ""}>${type.label}</option>`).join("");
-  modal("Movimiento de inventario", "Los movimientos quedan como auditoría de stock; las entradas con proveedor también registran una compra.", `<form id="movement-form" class="modal-form"><div class="field"><label for="movement-product">Producto</label><select id="movement-product" name="product_id">${productOptions}</select></div><div class="form-row"><div class="field"><label for="movement-type">Tipo</label><select id="movement-type" name="type">${types}</select></div>${field("movement-quantity", "Cantidad / stock final", "", "number", true, 'min="0" step="0.001"')}</div><div class="field"><label for="movement-supplier">Proveedor (opcional)</label><select id="movement-supplier" name="supplier_id"><option value="">Sin proveedor</option>${supplierOptions}</select></div><div class="form-row"><div class="field"><label for="movement-document">Documento de compra</label><select id="movement-document" name="purchase_document"><option>SIN_DOC</option><option>FACTURA</option><option>BOLETA</option><option>GUIA_DESPACHO</option></select></div>${field("movement-folio", "Folio de compra")}</div>${field("movement-cost", "Costo unitario neto (CLP)", "", "number", false, 'min="0" step="1"')}<div class="field"><label for="movement-note">Nota o motivo</label><input id="movement-note" name="note" placeholder="Ej.: compra, corrección, producto dañado"></div><div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">Registrar movimiento</button></div></form>`);
+  modal("Movimiento de inventario", "Los movimientos quedan como auditoría de stock; las entradas con proveedor también registran una compra.", `<form id="movement-form" class="modal-form"><div class="field"><label for="movement-product">Producto</label><select id="movement-product" name="product_id">${productOptions}</select></div><div class="form-row"><div class="field"><label for="movement-type">Tipo</label><select id="movement-type" name="type">${types}</select></div>${field("movement-quantity", "Cantidad / stock final", "", "number", true, 'min="0" step="0.001"')}</div><div class="field"><label for="movement-supplier">Proveedor (opcional)</label><select id="movement-supplier" name="supplier_id"><option value="">Sin proveedor</option>${supplierOptions}</select></div><div class="form-row"><div class="field"><label for="movement-document">Documento de compra</label><select id="movement-document" name="purchase_document"><option>SIN_DOC</option><option>FACTURA</option><option>BOLETA</option><option>GUIA_DESPACHO</option></select></div>${field("movement-folio", "Folio de compra")}</div>${field("movement-cost", "Costo unitario neto (CLP)", "", "number", false, 'min="0" step="1"')}<div class="field"><label for="movement-note">Nota o motivo</label><input id="movement-note" name="note" placeholder="Ej.: compra, corrección, producto dañado"></div><div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">Registrar movimiento</button></div></form>`, false);
   $("#movement-type").addEventListener("change", () => {
     const type = $("#movement-type").value;
     $('label[for="movement-quantity"]').textContent = type === "adjustment" ? "Nuevo stock final" : "Cantidad";
@@ -1267,8 +1209,10 @@ function openMovementForm(productId = "", supplierId = "", defaultType = "entry"
   $("#movement-type").dispatchEvent(new Event("change"));
 }
 
-function openExpenseForm() {
-  modal("Registrar gasto", "Los gastos se restarán de tus ingresos en el balance mensual.", `<form id="expense-form" class="modal-form"><div class="form-row">${field("expense-category", "Categoría", "", "text", true)}${field("expense-amount", "Monto (CLP)", "", "number", true, 'min="1" step="1"')}</div>${field("expense-description", "Descripción", "", "text", true)}<div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">Guardar gasto</button></div></form>`);
+function openExpenseForm(expense = null) {
+  const editing = Boolean(expense);
+  const form = `<form id="expense-form" class="modal-form"><div class="form-row">${field("expense-category", "Categoría", expense?.category || "", "text", true)}${field("expense-amount", "Monto (CLP)", expense?.amount ?? "", "number", true, 'min="1" step="1"')}</div>${field("expense-description", "Descripción", expense?.description || "", "text", true)}<div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">${editing ? "Guardar cambios" : "Guardar gasto"}</button></div><input type="hidden" name="expense-id" value="${expense?.id || ""}"></form>`;
+  modal(editing ? "Editar gasto" : "Registrar gasto", "Los gastos se restarán de tus ingresos en el balance mensual.", form);
 }
 
 function saveProduct(form) {
@@ -1533,6 +1477,28 @@ function openDeleteSaleModal(saleId) {
   modal("¿Estás seguro de eliminar la venta?", "Confirma antes de borrar definitivamente este registro.", content);
 }
 
+function openDeleteExpenseModal(expenseId) {
+  const expense = query("SELECT id,category,description,amount FROM expenses WHERE id=?", [expenseId])[0];
+  if (!expense) throw new Error("No se encontró el gasto seleccionado.");
+  const content = `<div class="modal-form">
+    <p class="confirm-message">¿Estás seguro de eliminar este gasto de <strong>${money(expense.amount)}</strong>?</p>
+    <p class="confirm-note">${escapeHtml(expense.category)} · ${escapeHtml(expense.description)}</p>
+    <div class="modal-actions">
+      <button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button>
+      <button type="button" class="button button-danger button-small" data-action="delete-expense" data-id="${expense.id}">Sí, eliminar gasto</button>
+    </div>
+  </div>`;
+  modal("¿Eliminar gasto?", "Confirma antes de borrar este registro.", content);
+}
+
+function deleteExpense(expenseId) {
+  if (!query("SELECT id FROM expenses WHERE id=?", [expenseId]).length) throw new Error("No se encontró el gasto que intentas eliminar.");
+  run("DELETE FROM expenses WHERE id=?", [expenseId]);
+  closeModal();
+  render();
+  notify("Gasto eliminado.");
+}
+
 function deleteSale(saleId) {
   const sale = query("SELECT id,status FROM sales WHERE id=?", [saleId])[0];
   if (!sale) throw new Error("No se encontró la venta que intentas eliminar.");
@@ -1593,14 +1559,20 @@ function saveSupplier(form) {
 
 function saveExpense(form) {
   const data = new FormData(form);
+  const expenseId = Number(data.get("expense-id")) || null;
   const amount = Number(data.get("expense-amount"));
   const category = String(data.get("expense-category")).trim();
   const description = String(data.get("expense-description")).trim();
   if (!category || !description || !Number.isInteger(amount) || amount <= 0) throw new Error("Completa la categoría, descripción y un monto entero mayor a cero.");
-  run("INSERT INTO expenses(category,description,amount,date) VALUES(?,?,?,?)", [category, description, amount, localDateTime()]);
+  if (expenseId) {
+    if (!query("SELECT id FROM expenses WHERE id=?", [expenseId]).length) throw new Error("No se encontró el gasto que intentas editar.");
+    run("UPDATE expenses SET category=?,description=?,amount=? WHERE id=?", [category, description, amount, expenseId]);
+  } else {
+    run("INSERT INTO expenses(category,description,amount,date) VALUES(?,?,?,?)", [category, description, amount, localDateTime()]);
+  }
   closeModal();
   render();
-  notify("Gasto registrado.");
+  notify(expenseId ? "Gasto actualizado." : "Gasto registrado.");
 }
 
 function addProductToCart(productId, keepFocusSelector = null) {
@@ -1722,6 +1694,11 @@ function bindEvents() {
       else if (action === "movement-for-product") openMovementForm(button.dataset.id);
       else if (action === "restock-product") openMovementForm(button.dataset.id, "", "entry");
       else if (action === "new-expense") openExpenseForm();
+      else if (action === "edit-expense") {
+        const expense = query("SELECT * FROM expenses WHERE id=?", [Number(button.dataset.id)])[0];
+        if (!expense) throw new Error("No se encontró el gasto seleccionado.");
+        openExpenseForm(expense);
+      } else if (action === "confirm-delete-expense") openDeleteExpenseModal(Number(button.dataset.id));
       else if (action === "close-modal") closeModal();
       else if (action === "customer-history") {
         customerHistoryId = Number(button.dataset.id);
@@ -1840,6 +1817,14 @@ function bindEvents() {
         deleteSale(Number(deleteButton.dataset.id));
       } catch (error) {
         showError(error, "No se pudo eliminar la venta.");
+      }
+    }
+    const expenseDeleteButton = event.target.closest('[data-action="delete-expense"]');
+    if (expenseDeleteButton) {
+      try {
+        deleteExpense(Number(expenseDeleteButton.dataset.id));
+      } catch (error) {
+        showError(error, "No se pudo eliminar el gasto.");
       }
     }
   });

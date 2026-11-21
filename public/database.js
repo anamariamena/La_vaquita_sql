@@ -519,6 +519,13 @@
         INSERT INTO gastos(categoria,descripcion,monto,fecha)
         VALUES(NEW.category,NEW.description,NEW.amount,COALESCE(NEW.date,CURRENT_TIMESTAMP));
       END;
+      CREATE TRIGGER IF NOT EXISTS expenses_update INSTEAD OF UPDATE ON expenses BEGIN
+        UPDATE gastos SET categoria=NEW.category,descripcion=NEW.description,monto=NEW.amount
+        WHERE id_gasto=OLD.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS expenses_delete INSTEAD OF DELETE ON expenses BEGIN
+        DELETE FROM gastos WHERE id_gasto=OLD.id;
+      END;
     `;
     run(database, views);
   }
