@@ -11,7 +11,7 @@
       password_hash TEXT NOT NULL,
       rol TEXT NOT NULL CHECK (rol IN ('ADMIN', 'CAJERO', 'BODEGUERO')),
       activo INTEGER NOT NULL DEFAULT 1,
-      creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+      creado_en DATETIME DEFAULT (DATETIME('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS categorias (
       id_categoria INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +28,7 @@
       email TEXT,
       direccion TEXT,
       activo INTEGER NOT NULL DEFAULT 1,
-      creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+      creado_en DATETIME DEFAULT (DATETIME('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS clientes (
       id_cliente INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +38,7 @@
       telefono TEXT,
       email TEXT,
       direccion TEXT,
-      creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+      creado_en DATETIME DEFAULT (DATETIME('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS productos (
       id_producto INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +55,7 @@
       stock_actual REAL NOT NULL DEFAULT 0,
       stock_minimo REAL NOT NULL DEFAULT 0,
       activo INTEGER NOT NULL DEFAULT 1,
-      actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+      actualizado_en DATETIME DEFAULT (DATETIME('now', 'localtime')),
       FOREIGN KEY (id_categoria) REFERENCES categorias(id_categoria) ON DELETE SET NULL
     );
     CREATE TABLE IF NOT EXISTS compras (
@@ -64,12 +64,12 @@
       id_usuario INTEGER NOT NULL,
       tipo_documento TEXT NOT NULL CHECK (tipo_documento IN ('FACTURA', 'BOLETA', 'GUIA_DESPACHO', 'SIN_DOC')),
       folio_documento TEXT,
-      fecha_emision DATE NOT NULL DEFAULT (DATE('now')),
+      fecha_emision DATE NOT NULL DEFAULT (DATE('now', 'localtime')),
       total_neto REAL NOT NULL DEFAULT 0,
       total_iva REAL NOT NULL DEFAULT 0,
       total_compra REAL NOT NULL DEFAULT 0,
       estado TEXT NOT NULL DEFAULT 'RECIBIDA' CHECK (estado IN ('RECIBIDA', 'ANULADA')),
-      creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+      creado_en DATETIME DEFAULT (DATETIME('now', 'localtime')),
       FOREIGN KEY (id_proveedor) REFERENCES proveedores(id_proveedor) ON DELETE SET NULL,
       FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
     );
@@ -89,7 +89,7 @@
       id_usuario INTEGER NOT NULL,
       tipo_documento TEXT NOT NULL DEFAULT 'BOLETA' CHECK (tipo_documento IN ('BOLETA', 'FACTURA', 'TICKET_INTERNO')),
       folio_documento TEXT,
-      fecha_venta DATETIME DEFAULT CURRENT_TIMESTAMP,
+      fecha_venta DATETIME DEFAULT (DATETIME('now', 'localtime')),
       subtotal_neto REAL NOT NULL DEFAULT 0,
       total_iva REAL NOT NULL DEFAULT 0,
       descuento_global REAL NOT NULL DEFAULT 0,
@@ -117,7 +117,7 @@
       metodo_pago TEXT NOT NULL CHECK (metodo_pago IN ('EFECTIVO', 'DEBITO', 'CREDITO', 'TRANSFERENCIA', 'CREDITO_INTERNO')),
       monto REAL NOT NULL CHECK (monto > 0),
       referencia_transaccion TEXT,
-      fecha_pago DATETIME DEFAULT CURRENT_TIMESTAMP,
+      fecha_pago DATETIME DEFAULT (DATETIME('now', 'localtime')),
       FOREIGN KEY (id_venta) REFERENCES ventas(id_venta) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS movimientos_inventario (
@@ -134,7 +134,7 @@
       costo_unitario REAL,
       referencia_origen TEXT,
       motivo TEXT,
-      fecha DATETIME DEFAULT CURRENT_TIMESTAMP,
+      fecha DATETIME DEFAULT (DATETIME('now', 'localtime')),
       FOREIGN KEY (id_producto) REFERENCES productos(id_producto),
       FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
     );
@@ -143,23 +143,33 @@
       categoria TEXT NOT NULL,
       descripcion TEXT NOT NULL,
       monto REAL NOT NULL CHECK (monto > 0),
-      fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      fecha DATETIME NOT NULL DEFAULT (DATETIME('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS app_migrations (
       version TEXT PRIMARY KEY,
-      applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      applied_at DATETIME NOT NULL DEFAULT (DATETIME('now', 'localtime'))
     );
     CREATE INDEX IF NOT EXISTS idx_productos_busqueda ON productos(nombre, sku, codigo_barras);
+    CREATE INDEX IF NOT EXISTS idx_productos_activo_stock ON productos(activo, stock_actual, nombre);
+    CREATE INDEX IF NOT EXISTS idx_productos_categoria ON productos(id_categoria);
     CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha_venta, estado);
+    CREATE INDEX IF NOT EXISTS idx_ventas_estado_fecha ON ventas(estado, fecha_venta);
+    CREATE INDEX IF NOT EXISTS idx_ventas_cliente ON ventas(id_cliente);
     CREATE INDEX IF NOT EXISTS idx_detalle_ventas_prod ON detalle_ventas(id_producto);
+    CREATE INDEX IF NOT EXISTS idx_detalle_ventas_venta ON detalle_ventas(id_venta);
     CREATE INDEX IF NOT EXISTS idx_kardex_producto_fecha ON movimientos_inventario(id_producto, fecha);
+    CREATE INDEX IF NOT EXISTS idx_movimientos_tipo_fecha ON movimientos_inventario(tipo_movimiento, fecha);
     CREATE INDEX IF NOT EXISTS idx_detalle_compras_producto ON detalle_compras(id_producto);
+    CREATE INDEX IF NOT EXISTS idx_detalle_compras_compra ON detalle_compras(id_compra);
+    CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON compras(id_proveedor);
     CREATE INDEX IF NOT EXISTS idx_pagos_venta_venta ON pagos_venta(id_venta);
+    CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos(fecha);
+    DROP TRIGGER IF EXISTS trg_actualizar_stock_kardex;
     CREATE TRIGGER IF NOT EXISTS trg_actualizar_stock_kardex
     AFTER INSERT ON movimientos_inventario
     BEGIN
       UPDATE productos
-      SET stock_actual = NEW.stock_resultante, actualizado_en = CURRENT_TIMESTAMP
+      SET stock_actual = NEW.stock_resultante, actualizado_en = DATETIME('now', 'localtime')
       WHERE id_producto = NEW.id_producto;
     END;
   `;
@@ -254,7 +264,7 @@
       const price = Number(product.price) || 0;
       run(database, `INSERT OR IGNORE INTO productos
         (id_producto,sku,nombre,id_categoria,unidad_medida,costo_promedio,precio_neto,precio_venta_final,stock_actual,stock_minimo,actualizado_en)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        VALUES(?,?,?,?,?,?,?,?,?,?,COALESCE(?,DATETIME('now','localtime')))`,
       [oldId, product.sku || null, product.name || "Producto migrado", catId, "UN", Number(product.cost) || 0, price, price, Number(product.stock) || 0, Number(product.min_stock) || 0, product.created_at || null]);
     }
     for (const customer of legacy.customers || []) {
@@ -268,16 +278,14 @@
     for (const sale of legacy.sales || []) {
       run(database, `INSERT OR IGNORE INTO ventas
         (id_venta,id_cliente,id_usuario,tipo_documento,fecha_venta,subtotal_neto,total_iva,descuento_global,total_venta,estado)
-        VALUES(?,?,?,'TICKET_INTERNO',?,?,0,?,?,?)`,
+        VALUES(?,?,?,'TICKET_INTERNO',COALESCE(?,DATETIME('now','localtime')),?,0,?,?,?)`,
       [sale.id, sale.customer_id || null, localUserId, sale.date || null, Number(sale.subtotal) || 0, Number(sale.discount) || 0, Number(sale.total) || 0, "COMPLETADA"]);
     }
     for (const item of legacy.sale_items || []) {
-      const productName = item.product_name || rows(database, "SELECT nombre FROM productos WHERE id_producto=?", [item.product_id])[0]?.nombre || "Producto";
       run(database, `INSERT OR IGNORE INTO detalle_ventas
         (id_detalle_venta,id_venta,id_producto,cantidad,precio_unitario_venta,costo_unitario_historico,subtotal)
         VALUES(?,?,?,?,?,?,?)`,
       [item.id, item.sale_id, item.product_id, item.quantity, item.unit_price, 0, item.line_total ?? item.unit_price * item.quantity]);
-      void productName;
     }
     const paymentTypes = {
       Efectivo: "EFECTIVO", Débito: "DEBITO", Crédito: "CREDITO",
@@ -312,7 +320,7 @@
       if (delta !== 0) {
         run(database, `INSERT OR IGNORE INTO movimientos_inventario
           (id_movimiento,id_producto,id_usuario,tipo_movimiento,cantidad,stock_anterior,stock_resultante,referencia_origen,motivo,fecha)
-          VALUES(?,?,?,?,?,?,?,?,?,?)`,
+          VALUES(?,?,?,?,?,?,?,?,?,COALESCE(?,DATETIME('now','localtime')))`,
         [movement.id, productId, localUserId, type, Math.abs(delta), previous, previous + delta, null, movement.note || null, movement.date || null]);
       }
       balances.set(productId, previous + delta);
@@ -329,7 +337,7 @@
     }
     for (const expense of legacy.expenses || []) {
       run(database, `INSERT OR IGNORE INTO gastos(id_gasto,categoria,descripcion,monto,fecha)
-        VALUES(?,?,?,?,?)`, [expense.id, expense.category || "Otros", expense.description || "Gasto migrado", expense.amount, expense.date || null]);
+        VALUES(?,?,?,?,COALESCE(?,DATETIME('now','localtime')))`, [expense.id, expense.category || "Otros", expense.description || "Gasto migrado", expense.amount, expense.date || null]);
     }
     run(database, "INSERT INTO app_migrations(version) VALUES('legacy-v1')");
   }
@@ -350,7 +358,36 @@
 
   function createCompatibilityViews(database) {
     const userId = Number(localUserId);
-    run(database, "DROP VIEW IF EXISTS sale_items; DROP VIEW IF EXISTS stock_movements;");
+    run(database, `
+      DROP VIEW IF EXISTS products;
+      DROP VIEW IF EXISTS customers;
+      DROP VIEW IF EXISTS suppliers;
+      DROP VIEW IF EXISTS sales;
+      DROP VIEW IF EXISTS sale_items;
+      DROP VIEW IF EXISTS payments;
+      DROP VIEW IF EXISTS stock_movements;
+      DROP VIEW IF EXISTS expenses;
+      DROP TRIGGER IF EXISTS products_insert;
+      DROP TRIGGER IF EXISTS products_update;
+      DROP TRIGGER IF EXISTS products_delete;
+      DROP TRIGGER IF EXISTS customers_insert;
+      DROP TRIGGER IF EXISTS customers_update;
+      DROP TRIGGER IF EXISTS customers_delete;
+      DROP TRIGGER IF EXISTS suppliers_insert;
+      DROP TRIGGER IF EXISTS suppliers_update;
+      DROP TRIGGER IF EXISTS suppliers_delete;
+      DROP TRIGGER IF EXISTS sales_insert;
+      DROP TRIGGER IF EXISTS sales_update;
+      DROP TRIGGER IF EXISTS sales_delete;
+      DROP TRIGGER IF EXISTS sale_items_insert;
+      DROP TRIGGER IF EXISTS sale_items_delete;
+      DROP TRIGGER IF EXISTS payments_insert;
+      DROP TRIGGER IF EXISTS payments_delete;
+      DROP TRIGGER IF EXISTS stock_movements_insert;
+      DROP TRIGGER IF EXISTS expenses_insert;
+      DROP TRIGGER IF EXISTS expenses_update;
+      DROP TRIGGER IF EXISTS expenses_delete;
+    `);
     const views = `
       CREATE VIEW IF NOT EXISTS products AS
         SELECT p.id_producto AS id,p.nombre AS name,COALESCE(p.sku,'') AS sku,COALESCE(c.nombre,'') AS category,
@@ -408,7 +445,7 @@
           (SELECT id_categoria FROM categorias WHERE nombre=TRIM(NEW.category)),
           COALESCE(NEW.unit,'UN'),COALESCE(NEW.cost,0),COALESCE(NEW.net_price,NEW.price,0),
           COALESCE(NEW.tax_exempt,0),COALESCE(NEW.price,0),COALESCE(NEW.stock,0),COALESCE(NEW.min_stock,0),
-          COALESCE(NEW.active,1),COALESCE(NEW.created_at,CURRENT_TIMESTAMP));
+          COALESCE(NEW.active,1),COALESCE(NEW.created_at,DATETIME('now','localtime')));
       END;
       CREATE TRIGGER IF NOT EXISTS products_update INSTEAD OF UPDATE ON products BEGIN
         INSERT INTO categorias(nombre) SELECT TRIM(NEW.category) WHERE TRIM(COALESCE(NEW.category,'')) <> ''
@@ -419,7 +456,7 @@
           unidad_medida=COALESCE(NEW.unit,'UN'),costo_promedio=COALESCE(NEW.cost,0),
           precio_neto=COALESCE(NEW.net_price,NEW.price,0),exento_iva=COALESCE(NEW.tax_exempt,0),
           precio_venta_final=COALESCE(NEW.price,0),stock_actual=COALESCE(NEW.stock,0),
-          stock_minimo=COALESCE(NEW.min_stock,0),activo=COALESCE(NEW.active,1),actualizado_en=CURRENT_TIMESTAMP
+          stock_minimo=COALESCE(NEW.min_stock,0),activo=COALESCE(NEW.active,1),actualizado_en=DATETIME('now','localtime')
         WHERE id_producto=OLD.id;
       END;
       CREATE TRIGGER IF NOT EXISTS products_delete INSTEAD OF DELETE ON products BEGIN
@@ -435,6 +472,9 @@
           giro=NULLIF(NEW.business,''),telefono=NULLIF(NEW.phone,''),email=NULLIF(NEW.email,''),
           direccion=NULLIF(COALESCE(NEW.address,NEW.note),'') WHERE id_cliente=OLD.id;
       END;
+      CREATE TRIGGER IF NOT EXISTS customers_delete INSTEAD OF DELETE ON customers BEGIN
+        DELETE FROM clientes WHERE id_cliente=OLD.id;
+      END;
       CREATE TRIGGER IF NOT EXISTS suppliers_insert INSTEAD OF INSERT ON suppliers BEGIN
         INSERT INTO proveedores(rut_identificacion,razon_social,contacto_nombre,telefono,email,direccion)
         VALUES(NULLIF(TRIM(NEW.rut),''),NEW.name,NULLIF(NEW.contact,''),NULLIF(NEW.phone,''),
@@ -445,10 +485,14 @@
           contacto_nombre=NULLIF(NEW.contact,''),telefono=NULLIF(NEW.phone,''),email=NULLIF(NEW.email,''),
           direccion=NULLIF(COALESCE(NEW.address,NEW.note),'') WHERE id_proveedor=OLD.id;
       END;
+      CREATE TRIGGER IF NOT EXISTS suppliers_delete INSTEAD OF DELETE ON suppliers BEGIN
+        DELETE FROM proveedores WHERE id_proveedor=OLD.id;
+      END;
       CREATE TRIGGER IF NOT EXISTS sales_insert INSTEAD OF INSERT ON sales BEGIN
         INSERT INTO ventas(id_cliente,id_usuario,tipo_documento,folio_documento,fecha_venta,subtotal_neto,
           total_iva,descuento_global,total_venta,estado)
-        VALUES(NEW.customer_id,${userId},COALESCE(NEW.document_type,'BOLETA'),NEW.folio,NEW.date,
+        VALUES(NEW.customer_id,${userId},COALESCE(NEW.document_type,'BOLETA'),NEW.folio,
+          COALESCE(NEW.date,DATETIME('now','localtime')),
           COALESCE(NEW.net_subtotal,NEW.subtotal,0),COALESCE(NEW.tax,0),COALESCE(NEW.discount,0),
           NEW.total,CASE NEW.status WHEN 'cancelled' THEN 'ANULADA' WHEN 'pending' THEN 'PENDIENTE' ELSE 'COMPLETADA' END);
       END;
@@ -484,8 +528,14 @@
       CREATE TRIGGER IF NOT EXISTS stock_movements_insert INSTEAD OF INSERT ON stock_movements BEGIN
         INSERT INTO compras(id_proveedor,id_usuario,tipo_documento,folio_documento,total_neto,total_iva,total_compra)
         SELECT NEW.supplier_id,${userId},COALESCE(NEW.purchase_document,'SIN_DOC'),NEW.purchase_folio,
-          ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0),0,
-          ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0)
+          ROUND(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0)),
+          CASE WHEN COALESCE(NEW.purchase_document,'SIN_DOC')='FACTURA'
+            THEN ROUND(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0)*0.19)
+            ELSE 0 END,
+          CASE WHEN COALESCE(NEW.purchase_document,'SIN_DOC')='FACTURA'
+            THEN ROUND(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0))
+              + ROUND(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0)*0.19)
+            ELSE ROUND(ABS(NEW.quantity)*COALESCE(NEW.purchase_cost,p.costo_promedio,0)) END
         FROM productos p
         WHERE p.id_producto=NEW.product_id AND NEW.type='entry' AND NEW.supplier_id IS NOT NULL;
         INSERT INTO detalle_compras(id_compra,id_producto,cantidad,costo_unitario_neto,subtotal_neto)
@@ -512,15 +562,16 @@
             THEN 'COMPRA #' || (SELECT MAX(id_compra) FROM compras)
             WHEN NEW.type='supplier_return' AND NEW.supplier_id IS NOT NULL
             THEN 'DEVOLUCION PROVEEDOR #' || NEW.supplier_id ELSE NEW.reference END,NEW.note,
-          COALESCE(NEW.date,CURRENT_TIMESTAMP)
+          COALESCE(NEW.date,DATETIME('now','localtime'))
         FROM productos p WHERE p.id_producto=NEW.product_id;
       END;
       CREATE TRIGGER IF NOT EXISTS expenses_insert INSTEAD OF INSERT ON expenses BEGIN
         INSERT INTO gastos(categoria,descripcion,monto,fecha)
-        VALUES(NEW.category,NEW.description,NEW.amount,COALESCE(NEW.date,CURRENT_TIMESTAMP));
+        VALUES(NEW.category,NEW.description,NEW.amount,COALESCE(NEW.date,DATETIME('now','localtime')));
       END;
       CREATE TRIGGER IF NOT EXISTS expenses_update INSTEAD OF UPDATE ON expenses BEGIN
-        UPDATE gastos SET categoria=NEW.category,descripcion=NEW.description,monto=NEW.amount
+        UPDATE gastos SET categoria=NEW.category,descripcion=NEW.description,monto=NEW.amount,
+          fecha=COALESCE(NEW.date,fecha)
         WHERE id_gasto=OLD.id;
       END;
       CREATE TRIGGER IF NOT EXISTS expenses_delete INSTEAD OF DELETE ON expenses BEGIN
@@ -537,9 +588,11 @@
       localUserId = existing.id_usuario;
       return;
     }
-    const secret = crypto.getRandomValues(new Uint8Array(32));
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", secret));
-    const passwordHash = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    let passwordHash = "local-no-auth";
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+      const secret = crypto.getRandomValues(new Uint8Array(32));
+      passwordHash = `local-${Array.from(secret, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    }
     run(database, `INSERT INTO usuarios(nombre,email,password_hash,rol)
       VALUES('Cuenta local del dispositivo','local@cuentaclara.invalid',?,'ADMIN')
       ON CONFLICT(email) DO UPDATE SET activo=1`,
@@ -580,7 +633,8 @@
     createCompatibilityViews(database);
     const missingTables = [
       "usuarios", "categorias", "proveedores", "clientes", "productos", "compras",
-      "detalle_compras", "ventas", "detalle_ventas", "pagos_venta", "movimientos_inventario"
+      "detalle_compras", "ventas", "detalle_ventas", "pagos_venta", "movimientos_inventario",
+      "gastos", "app_migrations"
     ].filter((table) => tableType(database, table) !== "table");
     if (missingTables.length) throw new Error(`No se pudo inicializar el esquema: ${missingTables.join(", ")}.`);
     const violations = rows(database, "PRAGMA foreign_key_check");
@@ -588,5 +642,5 @@
     return { userId: localUserId, journalMode };
   }
 
-  window.DatabaseLayer = { allocateAmount, initialize };
+  (typeof window !== "undefined" ? window : globalThis).DatabaseLayer = { allocateAmount, initialize };
 })();

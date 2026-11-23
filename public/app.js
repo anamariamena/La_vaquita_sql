@@ -39,6 +39,7 @@ let autoSavePending = false;
 let autoSaveInFlight = false;
 let autoSaveRequest = null;
 let autoSaveTimer;
+let hasUnsavedChanges = false;
 let saleCart = [];
 let paymentRows = [{ type: "Efectivo", amount: "" }];
 let saleCustomerId = "";
@@ -52,7 +53,6 @@ let sqlConsoleInput = "";
 let sqlConsoleOutput = null;
 let barcodeBuffer = "";
 let barcodeLastKeyTime = 0;
-let toastTimer;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -91,9 +91,13 @@ function scalar(sql, params = []) {
 
 function notify(message, type = "success") {
   const root = $("#toast-root");
-  root.innerHTML = `<div class="toast ${type === "error" ? "error" : ""}" role="status">${escapeHtml(message)}</div>`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { root.innerHTML = ""; }, 3600);
+  const toast = document.createElement("div");
+  toast.className = `toast ${type === "error" ? "error" : ""}`;
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  root.appendChild(toast);
+  while (root.children.length > 4) root.firstElementChild.remove();
+  setTimeout(() => { toast.remove(); }, type === "error" ? 5000 : 3600);
 }
 
 function showError(error, fallback) {
@@ -105,21 +109,25 @@ function databaseReady() {
   return Boolean(db);
 }
 
-function scheduleAutoSave() {
-  if (!databaseReady() || !autoSaveEnabled) return;
-  autoSavePending = true;
-  clearTimeout(autoSaveTimer);
-  $("#autosave-status").textContent = "Guardando automáticamente…";
-  autoSaveTimer = setTimeout(flushAutoSave, 400);
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
 }
 
-async function saveServerDatabase(bytes) {
-  const response = await fetch("/api/database", {
-    method: "PUT",
-    headers: { "Content-Type": "application/vnd.sqlite3" },
-    body: bytes
-  });
-  if (!response.ok) throw new Error(`El servidor respondió ${response.status}.`);
+function scheduleAutoSave() {
+  if (!databaseReady()) return;
+  hasUnsavedChanges = true;
+  if (!fileHandle || !autoSaveEnabled) {
+    $("#autosave-status").textContent = "Cambios sin guardar (usa Guardar / descargar)";
+    return;
+  }
+  autoSavePending = true;
+  clearTimeout(autoSaveTimer);
+  $("#autosave-status").textContent = "Guardando en archivo local…";
+  autoSaveTimer = setTimeout(flushAutoSave, 400);
 }
 
 async function flushAutoSave() {
@@ -128,48 +136,27 @@ async function flushAutoSave() {
     if (!saved) return false;
     return autoSavePending ? flushAutoSave() : true;
   }
-  if (!autoSavePending || !databaseReady()) return true;
+  if (!autoSavePending || !databaseReady() || !fileHandle) return true;
   autoSavePending = false;
   autoSaveInFlight = true;
   autoSaveRequest = (async () => {
     try {
       const bytes = db.export();
-      if (fileHandle) {
-        try {
-          const writable = await fileHandle.createWritable();
-          await writable.write(bytes);
-          await writable.close();
-        } catch (error) {
-          try {
-            await saveServerDatabase(bytes);
-          } catch (backupError) {
-            console.error("Fallaron el guardado del archivo y la copia del servidor:", backupError);
-            throw new Error(`No se pudo guardar en el archivo ni en el servidor local: ${error.message}`);
-          }
-          throw new Error(`No se pudo guardar en el archivo seleccionado. Se conservó una copia en el servidor local. ${error.message}`);
-        }
-        $("#autosave-status").textContent = "Guardado automáticamente en el archivo";
-        try {
-          await saveServerDatabase(bytes);
-        } catch (error) {
-          console.error("La base se guardó en el archivo, pero falló la copia del servidor:", error);
-          notify("Datos guardados en el archivo; no se pudo actualizar la copia del servidor.", "error");
-        }
-      } else {
-        await saveServerDatabase(bytes);
-        $("#autosave-status").textContent = "Guardado automáticamente en el servidor local";
-      }
+      const writable = await fileHandle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      if (!autoSavePending) hasUnsavedChanges = false;
+      $("#autosave-status").textContent = "Guardado en el archivo local";
       return true;
     } catch (error) {
+      hasUnsavedChanges = true;
       $("#autosave-status").textContent = "Error al guardar";
-      showError(error, fileHandle
-        ? "No se pudo guardar automáticamente en el archivo seleccionado."
-        : "No se pudieron guardar automáticamente los datos en el servidor local.");
+      showError(error, "No se pudo guardar automáticamente en el archivo local seleccionado.");
       return false;
     } finally {
       autoSaveInFlight = false;
       autoSaveRequest = null;
-      if (autoSavePending) autoSaveTimer = setTimeout(flushAutoSave, 100);
+      if (autoSavePending && fileHandle) autoSaveTimer = setTimeout(flushAutoSave, 100);
     }
   })();
   return autoSaveRequest;
@@ -179,7 +166,7 @@ async function initializeSql() {
   if (!SQL) SQL = await initSqlJs({ locateFile: (file) => `/vendor/${file}` });
 }
 
-async function openApplication(database, name, handle = null, saveOnOpen = true) {
+async function openApplication(database, name, handle = null) {
   const previousDb = db;
   db = database;
   try {
@@ -191,16 +178,24 @@ async function openApplication(database, name, handle = null, saveOnOpen = true)
     throw error;
   }
   if (previousDb && previousDb !== database) previousDb.close();
+  clearTimeout(autoSaveTimer);
   fileHandle = handle;
   filename = name || "la-vaquita.db";
-  autoSaveEnabled = true;
+  autoSaveEnabled = Boolean(handle);
+  autoSavePending = false;
+  hasUnsavedChanges = false;
   $("#welcome").classList.add("hidden");
   $("#application").classList.remove("hidden");
   $("#sidebar-db-name").textContent = filename;
+  $("#autosave-status").textContent = handle
+    ? "Guardado automático en archivo local"
+    : "Guardado manual (usa Guardar / descargar)";
   $("#today-label").textContent = new Intl.DateTimeFormat("es-CL", {
     weekday: "short", day: "numeric", month: "short"
   }).format(new Date());
   currentView = "dashboard";
+  dashboardRange = "month";
+  financeRange = 6;
   saleCart = [];
   paymentRows = [{ type: "Efectivo", amount: "" }];
   saleCustomerId = "";
@@ -208,16 +203,11 @@ async function openApplication(database, name, handle = null, saveOnOpen = true)
   saleDocumentType = "BOLETA";
   saleFolio = "";
   editingSaleId = null;
+  customerHistoryId = null;
+  searchValue = "";
+  sqlConsoleInput = "";
+  sqlConsoleOutput = null;
   render();
-  if (saveOnOpen) scheduleAutoSave();
-  if (journalMode.toLowerCase() !== "wal") {
-    notify(`SQLite no habilitó WAL (modo ${journalMode}); guarda o descarga el archivo para conservar los cambios.`, "error");
-  }
-}
-
-function setLoading(button, loading) {
-  button.disabled = loading;
-  button.classList.toggle("is-loading", loading);
 }
 
 async function openFilePicker() {
@@ -235,10 +225,8 @@ async function openFilePicker() {
         writePermission = await handle.requestPermission({ mode: "readwrite" });
       }
       const file = await handle.getFile();
-      await openDatabaseBytes(await file.arrayBuffer(), file.name, writePermission === "granted" ? handle : null);
-      if (writePermission !== "granted") {
-        notify("No se concedió permiso de escritura. Los cambios se guardarán en el servidor local, no en este archivo.", "error");
-      }
+      const writableHandle = writePermission === "granted" ? handle : null;
+      await openDatabaseBytes(await file.arrayBuffer(), file.name, writableHandle, writePermission !== "granted");
     } catch (error) {
       if (error.name !== "AbortError") showError(error, "No se pudo abrir la base de datos.");
     }
@@ -247,65 +235,112 @@ async function openFilePicker() {
   $("#database-file").click();
 }
 
-async function openDatabaseBytes(buffer, name, handle = null) {
+async function openDatabaseBytes(buffer, name, handle = null, permissionDenied = false) {
   try {
     await initializeSql();
     const database = new SQL.Database(new Uint8Array(buffer));
     await openApplication(database, name, handle);
-    if (!handle) {
-      notify("Este navegador no permite sobrescribir el archivo abierto. Los cambios se guardarán en el servidor local; usa Guardar / descargar para actualizar el archivo.", "error");
+    if (permissionDenied) {
+      notify("No se concedió permiso de escritura directa. Usa «Guardar / descargar» para conservar tus cambios localmente.", "error");
+    } else if (!handle) {
+      notify("Este navegador no permite sobrescribir el archivo abierto directamente. Usa «Guardar / descargar» para guardar tus cambios localmente.", "error");
+    } else {
+      notify(`Base de datos «${name}» lista.`);
     }
-    notify(`Base de datos «${name}» lista.`);
   } catch (error) {
     showError(error, "No se pudo abrir esta base de datos SQLite.");
   }
 }
 
 async function createDatabase() {
+  let database = null;
   try {
     await initializeSql();
-    const database = new SQL.Database();
-    try {
-      await DatabaseLayer.initialize(database);
-      const bytes = database.export();
-      const blob = new Blob([bytes], { type: "application/vnd.sqlite3" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "la-vaquita.db";
-      anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      notify("Archivo «la-vaquita.db» vacío descargado. Usa «Abrir una existente» para seleccionarlo.");
-    } finally {
-      database.close();
+    database = new SQL.Database();
+    await DatabaseLayer.initialize(database);
+    const bytes = database.export();
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: "la-vaquita.db",
+          types: [{
+            description: "Base de datos SQLite",
+            accept: { "application/vnd.sqlite3": [".db", ".sqlite", ".sqlite3"] }
+          }]
+        });
+        const writable = await handle.createWritable();
+        await writable.write(bytes);
+        await writable.close();
+        const savedName = handle.name || "la-vaquita.db";
+        await openApplication(database, savedName, handle);
+        database = null;
+        notify(`Base de datos vacía «${savedName}» creada y lista para usar.`);
+        return;
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        throw error;
+      }
     }
+    const blob = new Blob([bytes], { type: "application/vnd.sqlite3" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "la-vaquita.db";
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await openApplication(database, "la-vaquita.db", null);
+    database = null;
+    notify("Base de datos vacía «la-vaquita.db» descargada y lista para usar. Usa «Guardar / descargar» cuando realices cambios.");
   } catch (error) {
     showError(error, "No se pudo crear la base de datos.");
+  } finally {
+    if (database && database !== db) database.close();
   }
 }
 
 async function saveDatabase() {
   if (!databaseReady()) return;
-  const bytes = db.export();
-  const blob = new Blob([bytes], { type: "application/vnd.sqlite3" });
-  if (fileHandle) {
-    try {
-      const writable = await fileHandle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      notify("Cambios guardados en el archivo seleccionado.");
-      return;
-    } catch (error) {
-      showError(error, "No se pudo guardar sobre el archivo original. Prueba descargar una copia.");
-    }
+  clearTimeout(autoSaveTimer);
+  autoSavePending = false;
+  if (autoSaveRequest) {
+    await autoSaveRequest;
   }
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  notify(`Base de datos descargada como «${filename}».`);
+  autoSaveRequest = (async () => {
+    autoSaveInFlight = true;
+    try {
+      const bytes = db.export();
+      const blob = new Blob([bytes], { type: "application/vnd.sqlite3" });
+      if (fileHandle) {
+        try {
+          const writable = await fileHandle.createWritable();
+          await writable.write(bytes);
+          await writable.close();
+          if (!autoSavePending) hasUnsavedChanges = false;
+          $("#autosave-status").textContent = "Guardado en el archivo local";
+          notify("Cambios guardados en el archivo seleccionado.");
+          return true;
+        } catch (error) {
+          $("#autosave-status").textContent = "Error al guardar";
+          showError(error, "No se pudo guardar sobre el archivo original. Se descargará una copia local.");
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (!autoSavePending) hasUnsavedChanges = false;
+      $("#autosave-status").textContent = fileHandle ? "Copia descargada localmente" : "Descargado localmente";
+      notify(`Base de datos descargada como «${filename}».`);
+      return true;
+    } finally {
+      autoSaveInFlight = false;
+      autoSaveRequest = null;
+      if (autoSavePending && fileHandle) autoSaveTimer = setTimeout(flushAutoSave, 100);
+    }
+  })();
+  return autoSaveRequest;
 }
 
 function render() {
@@ -361,17 +396,18 @@ function executeSqlConsole() {
     return;
   }
 
-  const candidate = new SQL.Database(db.export());
+  const beforeBytes = db.export();
+  const candidate = new SQL.Database(beforeBytes);
   try {
     candidate.run("PRAGMA foreign_keys = ON");
-    candidate.run("SAVEPOINT sql_console_execution");
     const results = candidate.exec(sql);
-    candidate.run("RELEASE sql_console_execution");
+    const afterBytes = candidate.export();
+    const modified = !bytesEqual(beforeBytes, afterBytes);
     const previousDb = db;
     db = candidate;
     previousDb.close();
     sqlConsoleOutput = { results };
-    scheduleAutoSave();
+    if (modified) scheduleAutoSave();
   } catch (error) {
     candidate.close();
     sqlConsoleOutput = { error: error instanceof Error ? error.message : String(error) };
@@ -383,27 +419,44 @@ function executeSqlConsole() {
 async function exitToWelcome(button) {
   button.disabled = true;
   clearTimeout(autoSaveTimer);
-  if (autoSaveEnabled) autoSavePending = true;
-  if (autoSavePending && !(await flushAutoSave())) {
-    button.disabled = false;
-    return;
-  }
-  autoSaveEnabled = false;
-  $("#application").classList.add("hidden");
-  $("#welcome").classList.remove("hidden");
-  button.disabled = false;
-}
-
-async function restoreAutoSavedDatabase() {
   try {
-    const response = await fetch("/api/database", { cache: "no-store" });
-    if (response.status === 204) return;
-    if (!response.ok) throw new Error(`El servidor respondió ${response.status}.`);
-    await initializeSql();
-    const database = new SQL.Database(new Uint8Array(await response.arrayBuffer()));
-    await openApplication(database, "la-vaquita.db", null, false);
-  } catch (error) {
-    showError(error, "No se pudo restaurar la base de datos guardada automáticamente.");
+    if (fileHandle && autoSavePending) {
+      const saved = await flushAutoSave();
+      if (!saved) {
+        const forceExit = window.confirm("No se pudieron guardar los cambios en el archivo local. ¿Deseas salir de todas formas y descartar los cambios no guardados?");
+        if (!forceExit) return;
+      }
+    } else if (hasUnsavedChanges) {
+      const forceExit = window.confirm("Tienes cambios sin guardar en tu equipo. ¿Deseas salir de todas formas?");
+      if (!forceExit) return;
+    }
+    if (db) {
+      try { db.close(); } catch (closeError) { console.error(closeError); }
+    }
+    db = null;
+    fileHandle = null;
+    filename = "la-vaquita.db";
+    autoSaveEnabled = false;
+    autoSavePending = false;
+    hasUnsavedChanges = false;
+    saleCart = [];
+    paymentRows = [{ type: "Efectivo", amount: "" }];
+    saleCustomerId = "";
+    saleDiscount = "0";
+    saleDocumentType = "BOLETA";
+    saleFolio = "";
+    editingSaleId = null;
+    customerHistoryId = null;
+    searchValue = "";
+    sqlConsoleInput = "";
+    sqlConsoleOutput = null;
+    closeModal();
+    $("#autosave-status").textContent = "";
+    $("#page-content").innerHTML = "";
+    $("#application").classList.add("hidden");
+    $("#welcome").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -486,8 +539,10 @@ function chartPeriods(range, now = new Date()) {
 
 function shortMoney(amount) {
   const value = Number(amount) || 0;
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toLocaleString("es-CL", { maximumFractionDigits: 1 })}M`;
-  if (value >= 10_000) return `$${Math.round(value / 1_000).toLocaleString("es-CL")}k`;
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toLocaleString("es-CL", { maximumFractionDigits: 1 })}M`;
+  if (abs >= 10_000) return `${sign}$${Math.round(abs / 1_000).toLocaleString("es-CL")}k`;
   return money(value);
 }
 
@@ -527,7 +582,7 @@ function dashboardChart() {
     return `<line x1="${left}" y1="${lineY}" x2="${right}" y2="${lineY}" class="chart-gridline"/><text x="${left - 8}" y="${lineY + 3}" text-anchor="end" class="chart-text">${escapeHtml(shortMoney(amount))}</text>`;
   }).join("");
   const segmentLines = points.slice(1).map((point, index) => {
-    const previous = index === 0 ? previousValue : points[index - 1].value;
+    const previous = points[index].value;
     const trend = point.value > previous ? "positive" : point.value < previous ? "negative" : "neutral";
     return `<line x1="${x(index)}" y1="${y(points[index].value)}" x2="${x(index + 1)}" y2="${y(point.value)}" class="chart-segment chart-${trend}"/>`;
   }).join("");
@@ -643,7 +698,7 @@ function productRows(products) {
 
 function renderProducts() {
   const term = searchValue.toLocaleLowerCase("es");
-  const products = query("SELECT id,name,sku,category,price,cost,stock,min_stock,barcode,unit,net_price,tax_exempt,description FROM products ORDER BY name")
+  const products = query("SELECT id,name,sku,category,price,cost,stock,min_stock,barcode,unit,net_price,tax_exempt,description FROM products WHERE active=1 ORDER BY name")
     .filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
   const addButton = `<button class="button button-primary button-small" data-action="new-product">+ Agregar producto</button>`;
   return `${pageHeading("CATÁLOGO", "Tus productos", "Administra precios, categorías y disponibilidad.", addButton)}
@@ -652,7 +707,7 @@ function renderProducts() {
 
 function renderInventory() {
   const term = searchValue.toLocaleLowerCase("es");
-  const products = query("SELECT id,name,sku,barcode,category,price,stock,min_stock,unit FROM products ORDER BY name")
+  const products = query("SELECT id,name,sku,barcode,category,price,stock,min_stock,unit FROM products WHERE active=1 ORDER BY name")
     .filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLocaleLowerCase("es").includes(term));
   const analysis = inventorySalesAnalysis();
   const button = `<button class="button button-muted button-small" data-action="export-inventory">↓ Exportar a Excel</button><button class="button button-primary button-small" data-action="new-movement">+ Registrar movimiento</button>`;
@@ -664,7 +719,7 @@ function renderInventory() {
 }
 
 function exportInventory() {
-  const products = query("SELECT name,sku,category,price,stock,min_stock,unit FROM products ORDER BY name");
+  const products = query("SELECT name,sku,category,price,stock,min_stock,unit FROM products WHERE active=1 ORDER BY name");
   const xmlEscape = (value) => String(value ?? "").replace(/[<>&'"]/g, (character) => ({
     "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;"
   })[character]);
@@ -691,7 +746,7 @@ function exportInventory() {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `inventario-${new Date().toISOString().slice(0, 10)}.xls`;
+  anchor.download = `inventario-${dateKey(new Date())}.xls`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   notify(`Inventario exportado con ${products.length} ${products.length === 1 ? "producto" : "productos"}.`);
@@ -699,6 +754,13 @@ function exportInventory() {
 
 function renderSales() {
   const products = query("SELECT id,name,sku,barcode,category,price,stock,unit,net_price,cost,tax_exempt FROM products WHERE active=1 ORDER BY name");
+  let existingSale = null;
+  if (editingSaleId) {
+    existingSale = query("SELECT id,status FROM sales WHERE id=?", [editingSaleId])[0];
+    if (!existingSale || existingSale.status !== "completed") {
+      editingSaleId = null;
+    }
+  }
   const originalItems = editingSaleId
     ? query("SELECT product_id, SUM(quantity) AS quantity FROM sale_items WHERE sale_id=? GROUP BY product_id", [editingSaleId])
     : [];
@@ -734,7 +796,7 @@ function renderSales() {
     const codeText = [product.sku, product.barcode].filter(Boolean).join(" · ");
     return `<div class="result-row"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span class="result-info"><b>${escapeHtml(product.name)}</b><small>${quantityLabel(product.availableStock, product.unit)} disponibles${codeText ? ` · ${escapeHtml(codeText)}` : ""}</small></span><span class="result-price">${money(product.price)}</span><button class="icon-button" data-action="add-cart" data-id="${product.id}" aria-label="Agregar ${escapeHtml(product.name)}" ${product.availableStock <= 0 ? "disabled" : ""}>+</button></div>`;
   }).join("") : emptyState("No encontramos productos", "Agrega productos en la sección Productos.");
-  const cartContents = saleCart.length ? saleCart.map((item) => `<div class="cart-row"><span class="cart-name"><b>${escapeHtml(item.name)}</b><small>${money(item.price)} / ${item.unit} · ${money(item.price * item.quantity)}</small></span><span class="qty-controls"><input class="cart-quantity" data-cart-quantity="${item.id}" type="number" min="0.001" max="${item.stock}" step="${item.unit === "UN" || item.unit === "CAJA" ? "1" : "0.001"}" value="${item.quantity}" aria-label="Cantidad de ${escapeHtml(item.name)}"><button class="payment-remove" type="button" data-action="remove-cart-item" data-id="${item.id}" aria-label="Quitar ${escapeHtml(item.name)}" title="Quitar producto">×</button></span></div>`).join("") : emptyState("Tu venta está vacía", "Pistolea un código de barras o busca un producto para agregarlo aquí.");
+  const cartContents = saleCart.length ? saleCart.map((item) => `<div class="cart-row"><span class="cart-name"><b>${escapeHtml(item.name)}</b><small data-cart-item-summary="${item.id}">${money(item.price)} / ${item.unit} · ${money(Math.round(item.price * item.quantity))}</small></span><span class="qty-controls"><input class="cart-quantity" data-cart-quantity="${item.id}" type="number" min="0.001" max="${item.stock}" step="${item.unit === "UN" || item.unit === "CAJA" ? "1" : "0.001"}" value="${item.quantity}" aria-label="Cantidad de ${escapeHtml(item.name)}"><button class="payment-remove" type="button" data-action="remove-cart-item" data-id="${item.id}" aria-label="Quitar ${escapeHtml(item.name)}" title="Quitar producto">×</button></span></div>`).join("") : emptyState("Tu venta está vacía", "Pistolea un código de barras o busca un producto para agregarlo aquí.");
   const paymentMarkup = paymentRows.map((payment, index) => {
     const showAmountInput = isSplitPayment || payment.type === "Efectivo";
     return `<div class="payment-entry ${showAmountInput ? "with-amount" : "single-method"}">
@@ -750,7 +812,7 @@ function renderSales() {
         <div class="cart-footer"><div class="field"><label for="sale-customer">Cliente (opcional)</label><select id="sale-customer"><option value="" ${saleCustomerId === "" ? "selected" : ""}>Venta sin cliente</option>${customers.map((customer) => `<option value="${customer.id}" ${String(customer.id) === saleCustomerId ? "selected" : ""}>${escapeHtml(customer.name)}</option>`).join("")}</select></div>
           <div class="form-row"><div class="field"><label for="sale-document-type">Documento</label><select id="sale-document-type">${documentTypes.map((type) => `<option ${type === saleDocumentType ? "selected" : ""}>${type}</option>`).join("")}</select></div>${field("sale-folio", "Folio", saleFolio)}</div>
           <div class="field"><label for="sale-discount">Descuento (CLP)</label><input id="sale-discount" type="text" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(saleDiscount)}"></div>
-          <div class="cart-line"><span>Subtotal</span><span>${money(subTotal)}</span></div><div class="cart-line"><span>Descuento</span><span>− ${money(discount)}</span></div><div class="cart-line total"><span>Total a pagar</span><span>${money(total)}</span></div>
+          <div class="cart-line"><span>Subtotal</span><span id="cart-subtotal-value">${money(subTotal)}</span></div><div class="cart-line"><span>Descuento</span><span id="cart-discount-value">− ${money(discount)}</span></div><div class="cart-line total"><span>Total a pagar</span><span id="cart-total-value">${money(total)}</span></div>
           <div class="payment-header"><b>MEDIOS DE PAGO</b><button class="table-action" data-action="add-payment">+ Dividir pago</button></div>${paymentMarkup}
           <div id="payment-balance" class="payment-balance ${paymentError ? "error" : changeDue > 0 ? "change-due" : ""}">Ingresado: ${money(paymentTotal)} · ${paymentStatus}</div>
           <button class="button button-primary full-width" data-action="complete-sale" ${saleCart.length === 0 ? "disabled" : ""}>${editingSaleId ? "Guardar cambios de la venta" : "Completar venta"}</button>
@@ -761,8 +823,49 @@ function renderSales() {
     </div>`;
 }
 
+function updateCartSummaryDom() {
+  const subTotal = saleCart.reduce((total, item) => total + Math.round(item.price * item.quantity), 0);
+  const discount = Math.min(Number(saleDiscount) || 0, subTotal);
+  const total = subTotal - discount;
+  for (const item of saleCart) {
+    const summaryEl = $(`[data-cart-item-summary="${item.id}"]`);
+    if (summaryEl) {
+      summaryEl.textContent = `${money(item.price)} / ${item.unit} · ${money(Math.round(item.price * item.quantity))}`;
+    }
+  }
+  const subtotalEl = $("#cart-subtotal-value");
+  const discountEl = $("#cart-discount-value");
+  const totalEl = $("#cart-total-value");
+  if (subtotalEl) subtotalEl.textContent = money(subTotal);
+  if (discountEl) discountEl.textContent = `− ${money(discount)}`;
+  if (totalEl) totalEl.textContent = money(total);
+
+  const isSplitPayment = paymentRows.length > 1;
+  const isSingleNonCash = !isSplitPayment && paymentRows[0]?.type !== "Efectivo";
+  const effectiveAmounts = paymentRows.map((row) => isSingleNonCash ? total : (Number(row.amount) || 0));
+  const paymentTotal = effectiveAmounts.reduce((sum, amount) => sum + amount, 0);
+  const cashPaymentTotal = paymentRows.reduce((sum, row, index) => sum + (row.type === "Efectivo" ? effectiveAmounts[index] : 0), 0);
+  const otherPaymentTotal = paymentTotal - cashPaymentTotal;
+  const changeDue = otherPaymentTotal <= total && paymentTotal > total ? paymentTotal - total : 0;
+  const paymentStatus = otherPaymentTotal > total
+    ? `Pagos sin efectivo exceden ${money(otherPaymentTotal - total)}`
+    : paymentTotal === total
+      ? "Monto exacto"
+      : paymentTotal < total
+        ? `Faltan ${money(total - paymentTotal)}`
+        : changeDue > 0
+          ? `Vuelto: ${money(changeDue)}`
+          : `Excede ${money(paymentTotal - total)}; solo efectivo permite vuelto`;
+  const paymentError = paymentTotal < total || otherPaymentTotal > total || (paymentTotal > total && changeDue === 0);
+  const balanceEl = $("#payment-balance");
+  if (balanceEl) {
+    balanceEl.className = `payment-balance ${paymentError ? "error" : changeDue > 0 ? "change-due" : ""}`;
+    balanceEl.textContent = `Ingresado: ${money(paymentTotal)} · ${paymentStatus}`;
+  }
+}
+
 function salesTable(sales) {
-  const rows = sales.length ? sales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada"}</span></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("") : `<tr><td colspan="7">${emptyState("Sin ventas registradas", "No hay ventas en este período.")}</td></tr>`;
+  const rows = sales.length ? sales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada"}</span></td><td><div class="action-cell">${sale.status === "completed" ? `<button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button>` : ""}<button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("") : `<tr><td colspan="7">${emptyState("Sin ventas registradas", "No hay ventas en este período.")}</td></tr>`;
   return `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>DESCUENTO</th><th>TOTAL</th><th>ESTADO</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -854,7 +957,10 @@ function exportSalesMonth(offset) {
 function renderCustomers() {
   if (customerHistoryId !== null) return renderCustomerHistory(customerHistoryId);
   const term = searchValue.toLocaleLowerCase("es");
-  const customers = query(`SELECT c.id,c.name,c.phone,c.email,c.created_at,COUNT(s.id) AS sales_count,COALESCE(SUM(s.total),0) AS total FROM customers c LEFT JOIN sales s ON s.customer_id=c.id GROUP BY c.id ORDER BY c.name`)
+  const customers = query(`SELECT c.id,c.name,c.phone,c.email,c.created_at,
+      COUNT(CASE WHEN s.status='completed' THEN s.id END) AS sales_count,
+      COALESCE(SUM(CASE WHEN s.status='completed' THEN s.total ELSE 0 END),0) AS total
+    FROM customers c LEFT JOIN sales s ON s.customer_id=c.id GROUP BY c.id ORDER BY c.name`)
     .filter((customer) => `${customer.name} ${customer.phone} ${customer.email}`.toLocaleLowerCase("es").includes(term));
   const rows = customers.length ? customers.map((customer) => `<tr><td><strong>${escapeHtml(customer.name)}</strong></td><td>${escapeHtml(customer.phone || "—")}</td><td>${escapeHtml(customer.email || "—")}</td><td>${customer.sales_count}</td><td>${money(customer.total)}</td><td><button class="table-action" data-action="customer-history" data-id="${customer.id}">Ver historial →</button></td></tr>`).join("") : `<tr><td colspan="6">${emptyState("Aún no hay clientes", "Agrega clientes para mantener su historial.")}</td></tr>`;
   return `${pageHeading("RELACIONES", "Clientes", "Cada cliente conserva el historial completo de sus compras.", `<button class="button button-primary button-small" data-action="new-customer">+ Agregar cliente</button>`)}
@@ -867,17 +973,19 @@ function renderCustomerHistory(customerId) {
     customerHistoryId = null;
     return renderCustomers();
   }
-  const sales = query(`SELECT id,date,subtotal,discount,total FROM sales WHERE customer_id = ? ORDER BY id DESC`, [customerId]);
-  const total = sales.reduce((sum, sale) => sum + Number(sale.total), 0);
+  const sales = query(`SELECT id,date,subtotal,discount,total,status FROM sales WHERE customer_id = ? ORDER BY id DESC`, [customerId]);
+  const completedSales = sales.filter((sale) => sale.status === "completed");
+  const total = completedSales.reduce((sum, sale) => sum + Number(sale.total), 0);
   const items = query(`SELECT si.sale_id,si.product_name,si.quantity,si.unit_price,si.line_total FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.customer_id=? ORDER BY s.id DESC,si.id`, [customerId]);
   const rows = sales.length ? sales.map((sale) => {
     const saleItems = items.filter((item) => item.sale_id === sale.id);
-    return `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${saleItems.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join("<br>")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`;
-  }).join("") : `<tr><td colspan="6">${emptyState("Todavía no tiene compras", "Al asociar una venta con este cliente, aparecerá en su historial.")}</td></tr>`;
+    const statusLabel = sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada";
+    return `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${saleItems.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join("<br>")}</td><td>${sale.discount ? money(sale.discount) : "—"}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${statusLabel}</span></td><td><div class="action-cell">${sale.status === "completed" ? `<button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button>` : ""}<button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`;
+  }).join("") : `<tr><td colspan="7">${emptyState("Todavía no tiene compras", "Al asociar una venta con este cliente, aparecerá en su historial.")}</td></tr>`;
   return `<div class="detail-bar"><button class="detail-back" data-action="back-customers">← Volver a clientes</button></div>
     ${pageHeading("HISTORIAL DEL CLIENTE", escapeHtml(customer.name), `${escapeHtml(customer.phone || "Sin teléfono")} · ${escapeHtml(customer.email || "Sin correo")}`)}
-    <div class="history-summary"><div><b>${sales.length}</b><small>VENTAS REGISTRADAS</small></div><div><b>${money(total)}</b><small>TOTAL COMPRADO</small></div></div>
-    <article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>PRODUCTOS</th><th>DESCUENTO</th><th>TOTAL</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
+    <div class="history-summary"><div><b>${completedSales.length}</b><small>VENTAS COMPLETADAS</small></div><div><b>${money(total)}</b><small>TOTAL COMPRADO</small></div></div>
+    <article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>PRODUCTOS</th><th>DESCUENTO</th><th>TOTAL</th><th>ESTADO</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
 function renderSuppliers() {
@@ -892,10 +1000,11 @@ function renderSuppliers() {
 function renderDashboard() {
   const today = new Date();
   const todayKey = dateKey(today);
-  const salesToday = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND date LIKE ?", [`${todayKey}%`])) || 0;
+  const tomorrowKey = dateKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
+  const salesToday = Number(scalar("SELECT COALESCE(SUM(total),0) AS value FROM sales WHERE status='completed' AND date>=? AND date<?", [todayKey, tomorrowKey])) || 0;
   const productCount = Number(scalar("SELECT COUNT(*) AS value FROM products WHERE active=1")) || 0;
   const stockGroups = dashboardStockGroups();
-  const recentSales = query(`SELECT s.id,s.date,s.total,c.name AS customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC LIMIT 5`);
+  const recentSales = query(`SELECT s.id,s.date,s.total,s.status,c.name AS customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC LIMIT 5`);
   const chartRangeLabels = { week: "7 días", month: "Mensual", six: "6 meses", thirteen: "13 meses" };
   const chartTitle = { week: "Ventas de los últimos 7 días", month: "Ventas de este mes", six: "Ventas de 6 meses", thirteen: "Ventas de 13 meses" }[dashboardRange];
   const firstDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
@@ -903,9 +1012,14 @@ function renderDashboard() {
   const currentMonth = monthKey(today);
   const prevMonthDate = addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -1);
   const prevMonth = monthKey(prevMonthDate);
+  const nextMonth = monthKey(addMonths(new Date(today.getFullYear(), today.getMonth(), 1), 1));
   const firstMonth = monthKey(addMonths(new Date(today.getFullYear(), today.getMonth(), 1), -(financeRange - 1)));
   const previousYearMonth = monthKey(new Date(today.getFullYear() - 1, today.getMonth(), 1));
   const reportStartMonth = previousYearMonth < firstMonth ? previousYearMonth : firstMonth;
+  const reportStartDate = `${reportStartMonth}-01`;
+  const firstMonthStart = `${firstMonth}-01`;
+  const currentMonthStart = `${currentMonth}-01`;
+  const nextMonthStart = `${nextMonth}-01`;
   const percentFormatter = new Intl.NumberFormat("es-CL", { maximumFractionDigits: 1, minimumFractionDigits: 1 });
   const pct = (value) => `${percentFormatter.format(Number(value) || 0)}%`;
   const deltaBadge = (current, previous) => {
@@ -916,29 +1030,38 @@ function renderDashboard() {
     return `${sign}${pct(diff)} vs. mes anterior (${money(previous)})`;
   };
 
-  const monthlySales = query(`SELECT substr(s.date,1,7) AS month, SUM(s.total - s.tax) AS sales,
-      SUM(s.total) AS gross_sales,
-      SUM(COALESCE(i.cost,0)) AS cost, SUM(COALESCE(i.units,0)) AS units, COUNT(*) AS transactions,
-      SUM(CASE WHEN substr(s.date,1,10) BETWEEN ? AND ? THEN s.total - s.tax ELSE 0 END) AS recent_sales
-    FROM sales s LEFT JOIN (
+  const monthlySales = query(`WITH filtered_sales AS (
+      SELECT id, date, total, tax
+      FROM sales
+      WHERE status='completed' AND date>=? AND date<?
+    ),
+    sale_costs AS (
       SELECT si.sale_id, SUM(si.quantity*si.unit_cost) AS cost, SUM(si.quantity) AS units
-      FROM sale_items si JOIN sales filtered ON filtered.id=si.sale_id
-      WHERE filtered.status='completed' AND substr(filtered.date,1,7)>=? AND substr(filtered.date,1,7)<=?
+      FROM sale_items si
+      JOIN filtered_sales fs ON fs.id=si.sale_id
       GROUP BY si.sale_id
-    ) i ON i.sale_id=s.id
-    WHERE s.status='completed' AND substr(s.date,1,7)>=? AND substr(s.date,1,7)<=?
-    GROUP BY substr(s.date,1,7)`, [firstDayKey, todayKey, reportStartMonth, currentMonth, reportStartMonth, currentMonth]);
-  const monthlyMovements = query(`SELECT substr(date,1,7) AS month,
-      SUM(CASE WHEN type='loss' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS losses,
-      SUM(CASE WHEN type='entry' THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS purchases,
-      SUM(CASE WHEN type='loss' AND substr(date,1,10) BETWEEN ? AND ?
-        THEN ABS(quantity)*COALESCE(cost,0) ELSE 0 END) AS recent_losses
-    FROM stock_movements
-    WHERE type IN ('loss','entry') AND substr(date,1,7)>=? AND substr(date,1,7)<=?
-    GROUP BY substr(date,1,7)`, [firstDayKey, todayKey, firstMonth, currentMonth]);
+    )
+    SELECT substr(fs.date,1,7) AS month,
+      SUM(fs.total - fs.tax) AS sales,
+      SUM(fs.total) AS gross_sales,
+      SUM(COALESCE(sc.cost,0)) AS cost,
+      SUM(COALESCE(sc.units,0)) AS units,
+      COUNT(*) AS transactions,
+      SUM(CASE WHEN fs.date >= ? AND fs.date < ? THEN fs.total - fs.tax ELSE 0 END) AS recent_sales
+    FROM filtered_sales fs
+    LEFT JOIN sale_costs sc ON sc.sale_id=fs.id
+    GROUP BY substr(fs.date,1,7)`, [reportStartDate, nextMonthStart, firstDayKey, tomorrowKey]);
+  const monthlyMovements = query(`SELECT substr(fecha,1,7) AS month,
+      SUM(CASE WHEN tipo_movimiento='MERMA' THEN cantidad*COALESCE(costo_unitario,0) ELSE 0 END) AS losses,
+      SUM(CASE WHEN tipo_movimiento='ENTRADA_COMPRA' THEN cantidad*COALESCE(costo_unitario,0) ELSE 0 END) AS purchases,
+      SUM(CASE WHEN tipo_movimiento='MERMA' AND fecha >= ? AND fecha < ?
+        THEN cantidad*COALESCE(costo_unitario,0) ELSE 0 END) AS recent_losses
+    FROM movimientos_inventario
+    WHERE tipo_movimiento IN ('MERMA','ENTRADA_COMPRA') AND fecha>=? AND fecha<?
+    GROUP BY substr(fecha,1,7)`, [firstDayKey, tomorrowKey, firstMonthStart, nextMonthStart]);
   const monthlyExpenses = query(`SELECT substr(date,1,7) AS month, SUM(amount) AS amount
-    FROM expenses WHERE substr(date,1,7)>=? AND substr(date,1,7)<=?
-    GROUP BY substr(date,1,7)`, [firstMonth, currentMonth]);
+    FROM expenses WHERE date>=? AND date<?
+    GROUP BY substr(date,1,7)`, [firstMonthStart, nextMonthStart]);
   const salesByMonth = new Map(monthlySales.map((row) => [row.month, row]));
   const movementsByMonth = new Map(monthlyMovements.map((row) => [row.month, row]));
   const expensesByMonth = new Map(monthlyExpenses.map((row) => [row.month, Number(row.amount) || 0]));
@@ -979,8 +1102,8 @@ function renderDashboard() {
 
   const paymentBreakdown = query(`SELECT p.type, COUNT(DISTINCT p.sale_id) AS sales_count, COALESCE(SUM(p.amount),0) AS amount
     FROM payments p JOIN sales s ON s.id=p.sale_id
-    WHERE s.status='completed' AND substr(s.date,1,7)=?
-    GROUP BY p.type ORDER BY amount DESC`, [currentMonth]);
+    WHERE s.status='completed' AND s.date>=? AND s.date<?
+    GROUP BY p.type ORDER BY amount DESC`, [currentMonthStart, nextMonthStart]);
   const totalPaymentsMonth = paymentBreakdown.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
 
   const topProfitProducts = query(`SELECT si.product_name AS name,
@@ -989,13 +1112,13 @@ function renderDashboard() {
       SUM(si.quantity * si.unit_cost) AS cost,
       SUM(si.net_revenue - (si.quantity * si.unit_cost)) AS profit
     FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    WHERE s.status='completed' AND substr(s.date,1,7)=?
+    WHERE s.status='completed' AND s.date>=? AND s.date<?
     GROUP BY si.product_id, si.product_name
-    ORDER BY profit DESC, revenue DESC LIMIT 5`, [currentMonth]);
+    ORDER BY profit DESC, revenue DESC LIMIT 5`, [currentMonthStart, nextMonthStart]);
 
   const expenseCategories = query(`SELECT category, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount
-    FROM expenses WHERE substr(date,1,7)=?
-    GROUP BY category ORDER BY amount DESC`, [currentMonth]);
+    FROM expenses WHERE date>=? AND date<?
+    GROUP BY category ORDER BY amount DESC`, [currentMonthStart, nextMonthStart]);
 
   const monthlyData = Array.from({ length: financeRange }, (_, index) => {
     const date = addMonths(new Date(today.getFullYear(), today.getMonth(), 1), index - financeRange + 1);
@@ -1142,7 +1265,7 @@ function renderDashboard() {
       <section class="panel finance-history kpi-panel"><div class="panel-heading chart-panel-heading"><div><h2>Evolución de ganancias brutas, pérdidas y compras</h2><p>Ganancia bruta: ingresos netos menos costo de venta · pérdidas incluye mermas y gastos</p></div><div class="chart-range-switch" role="group" aria-label="Período del resumen financiero">${[3, 6, 12].map((range) => `<button class="chart-range-button ${financeRange === range ? "active" : ""}" data-finance-range="${range}" aria-pressed="${financeRange === range}">${range} meses</button>`).join("")}</div></div><div class="chart-legend finance-legend"><span><i class="legend-dot finance-earnings"></i>Ganancia bruta</span><span><i class="legend-dot negative"></i>Pérdidas</span><span><i class="legend-dot finance-purchases"></i>Compras</span></div><div class="chart-wrap finance-chart">${financeChart}</div></section>
     </section>
     <article class="panel section-spacer"><div class="panel-heading"><div><h2>Últimas ventas</h2><p>Actividad reciente</p></div><button class="panel-link" data-view="sales">Ir a ventas →</button></div>
-      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th><th></th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td><td><div class="action-cell"><button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button><button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>
+      ${recentSales.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>VENTA</th><th>FECHA</th><th>CLIENTE</th><th>TOTAL</th><th>ESTADO</th><th></th></tr></thead><tbody>${recentSales.map((sale) => `<tr><td><strong>#${sale.id}</strong></td><td>${dateLabel(sale.date)}</td><td>${escapeHtml(sale.customer || "Venta sin cliente")}</td><td><strong>${money(sale.total)}</strong></td><td><span class="${sale.status === "completed" ? "good-pill" : "neutral-pill"}">${sale.status === "completed" ? "Completada" : sale.status === "pending" ? "Pendiente" : "Anulada"}</span></td><td><div class="action-cell">${sale.status === "completed" ? `<button class="table-action" data-action="edit-sale" data-id="${sale.id}">Editar</button>` : ""}<button class="table-action danger-action" data-action="confirm-delete-sale" data-id="${sale.id}">Borrar</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("Aún no hay ventas", "Cuando registres una venta, aparecerá aquí.")}</article>
     <h2 class="subheading">Gastos recientes</h2><article class="panel table-panel"><div class="table-scroll"><table class="data-table"><thead><tr><th>FECHA</th><th>CATEGORÍA</th><th>DESCRIPCIÓN</th><th>MONTO</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
 }
 
@@ -1177,6 +1300,25 @@ function openProductForm(product = null) {
     <div class="modal-actions"><button type="button" class="button button-muted button-small" data-action="close-modal">Cancelar</button><button class="button button-primary button-small">${editing ? "Guardar cambios" : "Crear producto"}</button></div>
     <input type="hidden" name="product-id" value="${product?.id || ""}"></form>`;
   modal(editing ? "Editar producto" : "Nuevo producto", "Mantén actualizados los datos y el stock de tu catálogo.", form, false);
+  const netInput = $("#product-net-price");
+  const priceInput = $("#product-price");
+  const exemptCheckbox = $("#product-tax-exempt");
+  const syncFromPrice = () => {
+    const finalPrice = Number(priceInput.value);
+    if (priceInput.value === "" || !Number.isFinite(finalPrice) || finalPrice < 0) return;
+    netInput.value = String(exemptCheckbox.checked ? Math.round(finalPrice) : Math.round(finalPrice / 1.19));
+  };
+  const syncFromNet = () => {
+    const netPrice = Number(netInput.value);
+    if (netInput.value === "" || !Number.isFinite(netPrice) || netPrice < 0) return;
+    priceInput.value = String(exemptCheckbox.checked ? Math.round(netPrice) : Math.round(netPrice * 1.19));
+  };
+  priceInput.addEventListener("input", syncFromPrice);
+  netInput.addEventListener("input", syncFromNet);
+  exemptCheckbox.addEventListener("change", () => {
+    if (priceInput.value !== "") syncFromPrice();
+    else if (netInput.value !== "") syncFromNet();
+  });
 }
 
 function openCustomerForm() {
@@ -1188,7 +1330,7 @@ function openSupplierForm() {
 }
 
 function openMovementForm(productId = "", supplierId = "", defaultType = "entry") {
-  const products = query("SELECT id,name,stock FROM products ORDER BY name");
+  const products = query("SELECT id,name,stock FROM products WHERE active=1 ORDER BY name");
   const suppliers = query("SELECT id,name FROM suppliers ORDER BY name");
   if (!products.length) {
     notify("Primero agrega al menos un producto.", "error");
@@ -1239,6 +1381,7 @@ function saveProduct(form) {
   if ([product.netPrice, product.price, product.cost].some((value) => !Number.isInteger(value) || value < 0)) {
     throw new Error("Los precios y costos en pesos chilenos deben ser números enteros iguales o mayores a cero.");
   }
+  product.netPrice = product.taxExempt ? product.price : Math.round(product.price / 1.19);
   if ([product.stock, product.minStock].some((value) => !Number.isFinite(value) || value < 0)) {
     throw new Error("El stock debe ser un número válido igual o mayor a cero.");
   }
@@ -1264,7 +1407,7 @@ function saveProduct(form) {
       [product.name, product.sku, product.category, product.price, product.cost, 0, product.minStock,
         product.barcode, product.unit, product.netPrice, product.taxExempt, product.description]);
       const productId = query("SELECT id FROM products ORDER BY id DESC LIMIT 1")[0].id;
-      if (targetStock > 0) recordMovement(productId, "entry", targetStock, "Stock inicial");
+      if (targetStock > 0) recordMovement(productId, "adjustment", targetStock, "Stock inicial");
     }
     db.run("COMMIT");
   } catch (error) {
@@ -1379,7 +1522,13 @@ function saveSale() {
     cashRemaining -= appliedAmount;
     return { ...payment, amount: appliedAmount };
   });
-  const originalItems = editingSaleId
+  let existingSale = null;
+  if (editingSaleId) {
+    existingSale = query("SELECT id,status FROM sales WHERE id=?", [editingSaleId])[0];
+    if (!existingSale) throw new Error("No se encontró la venta que intentas editar.");
+    if (existingSale.status !== "completed") throw new Error("Solo se pueden editar ventas en estado completada.");
+  }
+  const originalItems = editingSaleId && existingSale?.status === "completed"
     ? query("SELECT product_id, SUM(quantity) AS quantity FROM sale_items WHERE sale_id=? GROUP BY product_id", [editingSaleId])
     : [];
   const originalQtyByProduct = new Map(originalItems.map((row) => [Number(row.product_id), Number(row.quantity) || 0]));
@@ -1440,6 +1589,9 @@ function saveSale() {
 function startEditSale(saleId) {
   const sale = query("SELECT * FROM sales WHERE id=?", [saleId])[0];
   if (!sale) throw new Error("No se encontró la venta seleccionada.");
+  if (sale.status !== "completed") {
+    throw new Error("Solo se pueden editar ventas en estado completada.");
+  }
   const items = query(`SELECT si.product_id,si.product_name,si.quantity,si.unit_price,si.unit_cost,
       p.stock,p.unit,p.net_price,p.tax_exempt
     FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
@@ -1449,21 +1601,29 @@ function startEditSale(saleId) {
   for (const item of items) {
     qtyByProduct.set(Number(item.product_id), (qtyByProduct.get(Number(item.product_id)) || 0) + Number(item.quantity));
   }
+  const groupedCart = new Map();
+  for (const item of items) {
+    const productId = Number(item.product_id);
+    const existing = groupedCart.get(productId);
+    if (existing) {
+      existing.quantity += Number(item.quantity);
+    } else {
+      const restoredStock = (Number(item.stock) || 0) + (qtyByProduct.get(productId) || 0);
+      groupedCart.set(productId, {
+        id: productId,
+        name: item.product_name,
+        price: Number(item.unit_price),
+        stock: restoredStock,
+        unit: item.unit || "UN",
+        cost: Number(item.unit_cost) || 0,
+        netPrice: Number(item.net_price) || Number(item.unit_price),
+        taxExempt: Boolean(item.tax_exempt),
+        quantity: Number(item.quantity)
+      });
+    }
+  }
   editingSaleId = Number(sale.id);
-  saleCart = items.map((item) => {
-    const restoredStock = (Number(item.stock) || 0) + (qtyByProduct.get(Number(item.product_id)) || 0);
-    return {
-      id: Number(item.product_id),
-      name: item.product_name,
-      price: Number(item.unit_price),
-      stock: restoredStock,
-      unit: item.unit || "UN",
-      cost: Number(item.unit_cost) || 0,
-      netPrice: Number(item.net_price) || Number(item.unit_price),
-      taxExempt: Boolean(item.tax_exempt),
-      quantity: Number(item.quantity)
-    };
-  });
+  saleCart = Array.from(groupedCart.values());
   paymentRows = payments.length
     ? payments.map((p) => ({ type: p.type, amount: String(p.amount), reference: p.reference || "" }))
     : [{ type: "Efectivo", amount: String(sale.total) }];
@@ -1649,6 +1809,23 @@ function addProductByBarcode(code, keepSearchFocus = true) {
 }
 
 function bindEvents() {
+  window.addEventListener("beforeunload", (event) => {
+    if (databaseReady() && (hasUnsavedChanges || autoSavePending)) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
+  $("#welcome .brand")?.addEventListener("click", (event) => {
+    event.preventDefault();
+  });
+  $(".sidebar-brand")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (!databaseReady()) return;
+    currentView = "dashboard";
+    searchValue = "";
+    customerHistoryId = null;
+    render();
+  });
   $("#create-database").addEventListener("click", createDatabase);
   $("#open-database").addEventListener("click", openFilePicker);
   $("#change-database").addEventListener("click", openFilePicker);
@@ -1739,13 +1916,6 @@ function bindEvents() {
       else if (action === "remove-cart-item") {
         saleCart = saleCart.filter((entry) => entry.id !== Number(button.dataset.id));
         render();
-      } else if (action === "cart-qty") {
-        const item = saleCart.find((entry) => entry.id === Number(button.dataset.id));
-        if (item) {
-          item.quantity += Number(button.dataset.change);
-          if (item.quantity <= 0) saleCart = saleCart.filter((entry) => entry !== item);
-          render();
-        }
       } else if (action === "add-payment") {
         paymentRows.push({ type: "Transferencia", amount: "" });
         render();
@@ -1808,16 +1978,18 @@ function bindEvents() {
       const quantity = Number(event.target.value);
       if (!item || !Number.isFinite(quantity) || quantity <= 0 || quantity > item.stock) {
         notify("La cantidad debe ser mayor a cero y no superar el stock disponible.", "error");
-        render();
+        if (item) event.target.value = String(item.quantity);
+        updateCartSummaryDom();
         return;
       }
       if (["UN", "CAJA"].includes(item.unit) && !Number.isInteger(quantity)) {
         notify("La cantidad de unidades y cajas debe ser entera.", "error");
-        render();
+        event.target.value = String(item.quantity);
+        updateCartSummaryDom();
         return;
       }
       item.quantity = quantity;
-      render();
+      updateCartSummaryDom();
     }
   });
   $("#modal-root").addEventListener("submit", (event) => {
@@ -1902,4 +2074,3 @@ function bindEvents() {
 }
 
 bindEvents();
-restoreAutoSavedDatabase();
